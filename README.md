@@ -20,35 +20,35 @@ pip install -r requirements.txt
 
 ```bash
 # Scrape CVPR paper metadata for 2020-2022
-python scrape_cvpr.py --conference CVPR --start-year 2020 --end-year 2022
+python scrape_cvf.py --conference CVPR --start-year 2020 --end-year 2022
 ```
 
 ### Scrape multiple meetings
 
 ```bash
 # Scrape both CVPR and ICCV papers 2021-2023
-python scrape_cvpr.py -c CVPR ICCV -s 2021 -e 2023
+python scrape_cvf.py -c CVPR ICCV -s 2021 -e 2023
 ```
 
 ### Download PDF files
 
 ```bash
 # Scrape the metadata and download the PDF
-python scrape_cvpr.py -c CVPR -s 2020 -e 2022 --download-pdf
+python scrape_cvf.py -c CVPR -s 2020 -e 2022 --download-pdf
 ```
 
 ### Customize the output directory
 
 ```bash
 # Specify the save directory for Excel and PDF
-python scrape_cvpr.py -c CVPR -s 2020 -e 2022 --output-dir mydata --pdf-dir mypapers -dp
+python scrape_cvf.py -c CVPR -s 2020 -e 2022 --output-dir mydata --pdf-dir mypapers -dp
 ```
 
 ### Full example
 
 ```bash
 # Scrape multiple meetings, download PDFs, customize the catalog
-python scrape_cvpr.py -c CVPR ICCV ECCV -s 2020 -e 2023 -dp -od mydata -pd mypapers
+python scrape_cvf.py -c CVPR ICCV ECCV -s 2020 -e 2023 -dp -od mydata -pd mypapers
 ```
 
 ## Command-line arguments
