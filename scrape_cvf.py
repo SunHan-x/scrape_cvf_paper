@@ -240,7 +240,7 @@ Examples:
     parser.add_argument(
         '--start-year', '-s',
         type=int,
-        default=2024,
+        default=2025,
         help='Start year (inclusive)'
     )
     
