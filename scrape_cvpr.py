@@ -78,20 +78,65 @@ def scrape_year(year, conference, download_pdfs=False, pdf_dir=""):
     """
     print(f"Starting scrape for {conference.upper()} {year}...")
     
-    # CVPR 2020 uses a different URL structure (by day, not 'all')
-    if conference.upper() == "CVPR" and year == 2020:
-        # For 2020, we need to scrape multiple days
-        days = ["2020-06-16", "2020-06-17", "2020-06-18"]
-        all_papers = []
-        for day in days:
-            url = f"{BASE_URL}{conference.upper()}{year}?day={day}"
-            papers = scrape_day(url, year, day, conference, download_pdfs, pdf_dir)
-            all_papers.extend(papers)
-        return all_papers
-    else:
-        # The 'all' day usually lists all papers for other years
-        url = f"{BASE_URL}{conference.upper()}{year}?day=all"
-        return scrape_day(url, year, "all", conference, download_pdfs, pdf_dir)
+    # First try to get all papers at once using day=all
+    url_all = f"{BASE_URL}{conference.upper()}{year}?day=all"
+    
+    try:
+        response = requests.get(url_all, timeout=20)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Check if we actually got papers (look for ptitle elements)
+        dt_elements = soup.find_all('dt', class_='ptitle')
+        
+        if len(dt_elements) > 0:
+            # day=all works, use it
+            print(f"  Using day=all for {conference.upper()} {year}")
+            return scrape_day(url_all, year, "all", conference, download_pdfs, pdf_dir)
+        else:
+            # day=all returned no papers, need to try individual days
+            print(f"  day=all returned no papers, trying to find individual days...")
+            
+    except Exception as e:
+        print(f"  day=all failed: {e}, trying to find individual days...")
+    
+    # If day=all doesn't work, try to scrape by individual days
+    # First, get the main conference page to find available days
+    main_url = f"{BASE_URL}{conference.upper()}{year}"
+    
+    try:
+        response = requests.get(main_url, timeout=20)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Find day links in the navigation (usually in <dd> tags or links with ?day= parameter)
+        day_links = []
+        for link in soup.find_all('a', href=True):
+            href = link['href']
+            if '?day=' in href and href not in day_links:
+                # Extract the day parameter
+                if 'day=' in href:
+                    day_links.append(href)
+        
+        if day_links:
+            print(f"  Found {len(day_links)} day(s) to scrape")
+            all_papers = []
+            for link in day_links:
+                # Extract day value from the link
+                day_param = link.split('day=')[1].split('&')[0] if '&' in link.split('day=')[1] else link.split('day=')[1]
+                full_url = urljoin(BASE_URL, link)
+                papers = scrape_day(full_url, year, day_param, conference, download_pdfs, pdf_dir)
+                all_papers.extend(papers)
+            return all_papers
+        else:
+            print(f"  Warning: Could not find day links for {conference.upper()} {year}")
+            # Last resort: try day=all anyway
+            return scrape_day(url_all, year, "all", conference, download_pdfs, pdf_dir)
+            
+    except Exception as e:
+        print(f"  Error accessing main page: {e}")
+        # Last resort: try day=all anyway
+        return scrape_day(url_all, year, "all", conference, download_pdfs, pdf_dir)
 
 def scrape_day(url, year, day, conference, download_pdfs=False, pdf_dir=""):
     """
@@ -195,14 +240,14 @@ Examples:
     parser.add_argument(
         '--start-year', '-s',
         type=int,
-        required=True,
+        default=2024,
         help='Start year (inclusive)'
     )
     
     parser.add_argument(
         '--end-year', '-e',
         type=int,
-        required=True,
+        default=2025,
         help='End year (inclusive)'
     )
     
@@ -262,21 +307,32 @@ def main():
     print()
     
     all_papers = []
+    papers_by_sheet = {}  # Dictionary to organize papers by sheet name (conference_year)
     
     for conference in conferences:
         for year in years:
             year_papers = scrape_year(year, conference, args.download_pdf, args.pdf_dir)
             all_papers.extend(year_papers)
+            
+            # Organize papers by sheet name
+            sheet_name = f"{conference}_{year}"
+            if sheet_name not in papers_by_sheet:
+                papers_by_sheet[sheet_name] = []
+            papers_by_sheet[sheet_name].extend(year_papers)
+            
             print(f"Finished {conference} {year}. Total papers so far: {len(all_papers)}")
             
-            # Save intermediate results
-            df = pd.DataFrame(all_papers)
-            df.to_excel(output_file, index=False, engine='openpyxl')
+            # Save intermediate results with multiple sheets
+            with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+                for sheet_name, papers in papers_by_sheet.items():
+                    df = pd.DataFrame(papers)
+                    df.to_excel(writer, sheet_name=sheet_name, index=False)
             print(f"Saved progress to {output_file}")
             print()
 
     print("Scraping complete!")
     print(f"Total papers scraped: {len(all_papers)}")
+    print(f"Sheets created: {', '.join(papers_by_sheet.keys())}")
     print(f"Data saved to {output_file}")
 
 if __name__ == "__main__":
