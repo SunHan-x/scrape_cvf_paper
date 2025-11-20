@@ -60,4 +60,4 @@ python scrape_cvpr.py -c CVPR ICCV ECCV -s 2020 -e 2023 -dp -od mydata -pd mypap
 | `--end-year` | `-e` | End year (inclusive) | `2025` | no |
 | `--output-dir` | `-od` | Excel file save directory | `xlsx` | no |
 | `--download-pdf` | `-dp` | Whether to download PDF files | `False` | no |
-| `--pdf-dir` | `-pd` | PDF file saving directory (requires '--download-pdf') | `pdf` | 否 |
+| `--pdf-dir` | `-pd` | PDF file saving directory (requires '--download-pdf') | `pdf` | no |
