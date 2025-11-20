@@ -19,6 +19,11 @@ pip install -r requirements.txt
 ### Basic usage
 
 ```bash
+# Scrape CVPR paper metadata for 2025
+python scrape_cvf.py --conference CVPR
+```
+
+```bash
 # Scrape CVPR paper metadata for 2020-2022
 python scrape_cvf.py --conference CVPR --start-year 2020 --end-year 2022
 ```
