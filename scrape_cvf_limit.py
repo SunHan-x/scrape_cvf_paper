@@ -89,11 +89,16 @@ def download_pdf(pdf_url, save_dir, filename):
         print(f"    Error downloading PDF: {e}")
         return ""
 
-def scrape_year(year, conference, download_pdfs=False, pdf_dir=""):
+def scrape_year(year, conference, download_pdfs=False, pdf_dir="", limit=None):
     """
     Scrapes all papers for a specific year and conference.
+    
+    Args:
+        limit: Maximum number of papers to scrape for this year (None = no limit)
     """
     print(f"Starting scrape for {conference.upper()} {year}...")
+    if limit:
+        print(f"  Limit: {limit} papers")
     
     # First try to get all papers at once using day=all
     url_all = f"{BASE_URL}{conference.upper()}{year}?day=all"
@@ -109,7 +114,7 @@ def scrape_year(year, conference, download_pdfs=False, pdf_dir=""):
         if len(dt_elements) > 0:
             # day=all works, use it
             print(f"  Using day=all for {conference.upper()} {year}")
-            return scrape_day(url_all, year, "all", conference, download_pdfs, pdf_dir)
+            return scrape_day(url_all, year, "all", conference, download_pdfs, pdf_dir, limit)
         else:
             # day=all returned no papers, need to try individual days
             print(f"  day=all returned no papers, trying to find individual days...")
@@ -139,25 +144,32 @@ def scrape_year(year, conference, download_pdfs=False, pdf_dir=""):
             print(f"  Found {len(day_links)} day(s) to scrape")
             all_papers = []
             for link in day_links:
+                if limit and len(all_papers) >= limit:
+                    print(f"  Reached limit of {limit} papers, stopping...")
+                    break
                 # Extract day value from the link
                 day_param = link.split('day=')[1].split('&')[0] if '&' in link.split('day=')[1] else link.split('day=')[1]
                 full_url = urljoin(BASE_URL, link)
-                papers = scrape_day(full_url, year, day_param, conference, download_pdfs, pdf_dir)
+                remaining_limit = limit - len(all_papers) if limit else None
+                papers = scrape_day(full_url, year, day_param, conference, download_pdfs, pdf_dir, remaining_limit)
                 all_papers.extend(papers)
             return all_papers
         else:
             print(f"  Warning: Could not find day links for {conference.upper()} {year}")
             # Last resort: try day=all anyway
-            return scrape_day(url_all, year, "all", conference, download_pdfs, pdf_dir)
+            return scrape_day(url_all, year, "all", conference, download_pdfs, pdf_dir, limit)
             
     except Exception as e:
         print(f"  Error accessing main page: {e}")
         # Last resort: try day=all anyway
-        return scrape_day(url_all, year, "all", conference, download_pdfs, pdf_dir)
+        return scrape_day(url_all, year, "all", conference, download_pdfs, pdf_dir, limit)
 
-def scrape_day(url, year, day, conference, download_pdfs=False, pdf_dir=""):
+def scrape_day(url, year, day, conference, download_pdfs=False, pdf_dir="", limit=None):
     """
     Scrapes papers from a specific day/page.
+    
+    Args:
+        limit: Maximum number of papers to scrape (None = no limit)
     """
     print(f"  Fetching {day} for {year}...")
     
@@ -181,7 +193,12 @@ def scrape_day(url, year, day, conference, download_pdfs=False, pdf_dir=""):
     # Find all dt elements with class 'ptitle'
     dt_elements = soup.find_all('dt', class_='ptitle')
     
-    print(f"  Found {len(dt_elements)} papers for {year} {day}.")
+    # Apply limit if specified
+    if limit and len(dt_elements) > limit:
+        dt_elements = dt_elements[:limit]
+        print(f"  Found {len(soup.find_all('dt', class_='ptitle'))} papers, limiting to {limit}.")
+    else:
+        print(f"  Found {len(dt_elements)} papers for {year} {day}.")
     
     for i, dt in enumerate(dt_elements):
         a_tag = dt.find('a')
@@ -234,16 +251,16 @@ def parse_arguments():
         epilog="""
 Examples:
   # Scrape CVPR papers from 2020 to 2022
-  python scrape_cvpr.py --conference CVPR --start-year 2020 --end-year 2022
+  python scrape_cvf_limit.py --conference CVPR --start-year 2020 --end-year 2022
   
-  # Scrape multiple conferences
-  python scrape_cvpr.py --conference CVPR ICCV --start-year 2021 --end-year 2023
+  # Scrape multiple conferences with limit
+  python scrape_cvf_limit.py --conference CVPR ICCV --start-year 2021 --end-year 2023 --limit 100
   
   # Specify output and PDF directories
-  python scrape_cvpr.py --conference CVPR --start-year 2020 --end-year 2022 --output-dir data --pdf-dir papers
+  python scrape_cvf_limit.py --conference CVPR --start-year 2020 --end-year 2022 --output-dir data --pdf-dir papers
   
-  # Download PDFs
-  python scrape_cvpr.py --conference CVPR --start-year 2020 --end-year 2022 --download-pdf
+  # Download PDFs with limit per year
+  python scrape_cvf_limit.py --conference CVPR --start-year 2020 --end-year 2022 --download-pdf --limit 50
         """
     )
     
@@ -289,11 +306,22 @@ Examples:
         help='Directory to save PDF files (default: pdf)'
     )
     
+    parser.add_argument(
+        '--limit', '-l',
+        type=int,
+        default=None,
+        help='Maximum number of papers to scrape per year (default: no limit)'
+    )
+    
     args = parser.parse_args()
     
     # Validate year range
     if args.start_year > args.end_year:
         parser.error(f"Start year ({args.start_year}) must be <= end year ({args.end_year})")
+    
+    # Validate limit
+    if args.limit is not None and args.limit <= 0:
+        parser.error(f"Limit must be a positive integer")
     
     # Validate pdf-dir only when download-pdf is enabled
     if not args.download_pdf and args.pdf_dir != 'pdf':
@@ -384,6 +412,8 @@ def main():
     print(f"  Download PDFs: {args.download_pdf}")
     if args.download_pdf:
         print(f"  PDF directory: {args.pdf_dir}")
+    if args.limit:
+        print(f"  Limit per year: {args.limit} papers")
     print()
     
     for conference in conferences:
@@ -396,7 +426,7 @@ def main():
                 continue
             
             print(f"Starting {conference} {year}...")
-            year_papers = scrape_year(year, conference, args.download_pdf, args.pdf_dir)
+            year_papers = scrape_year(year, conference, args.download_pdf, args.pdf_dir, args.limit)
             all_papers.extend(year_papers)
             
             # Organize papers by sheet name
