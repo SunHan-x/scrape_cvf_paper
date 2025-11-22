@@ -1,0 +1,315 @@
+"""
+GitHub 搜索器 - 使用 GitHub API 搜索论文相关实现
+"""
+
+import time
+from typing import List, Dict, Optional
+import requests
+
+from config import GITHUB_API_TOKEN
+from utils import normalize_url, extract_repo_owner_name
+from llm_client import llm_client
+
+
+class GitHubSearcher:
+    """GitHub API 搜索封装"""
+    
+    def __init__(self, token: Optional[str] = GITHUB_API_TOKEN):
+        self.token = token
+        self.base_url = "https://api.github.com"
+        self.headers = {
+            "Accept": "application/vnd.github.v3+json"
+        }
+        if token and token != "your_github_token_here":
+            self.headers["Authorization"] = f"token {token}"
+    
+    def search_repositories(
+        self,
+        query: str,
+        max_results: int = 10
+    ) -> List[Dict]:
+        """
+        搜索 GitHub 仓库
+        
+        Args:
+            query: 搜索查询
+            max_results: 最大结果数
+            
+        Returns:
+            仓库信息列表
+        """
+        url = f"{self.base_url}/search/repositories"
+        params = {
+            "q": query,
+            "sort": "stars",
+            "order": "desc",
+            "per_page": min(max_results, 100)
+        }
+        
+        try:
+            response = requests.get(
+                url,
+                headers=self.headers,
+                params=params,
+                timeout=10
+            )
+            
+            if response.status_code == 403:
+                print(f"    ⚠️  GitHub API 限速，等待...")
+                time.sleep(60)
+                return []
+            
+            response.raise_for_status()
+            data = response.json()
+            
+            repos = []
+            for item in data.get("items", [])[:max_results]:
+                repos.append({
+                    "name": item["name"],
+                    "full_name": item["full_name"],
+                    "html_url": item["html_url"],
+                    "description": item.get("description", ""),
+                    "stars": item["stargazers_count"],
+                    "forks": item["forks_count"],
+                    "language": item.get("language", ""),
+                    "updated_at": item["updated_at"],
+                    "topics": item.get("topics", []),
+                })
+            
+            return repos
+            
+        except Exception as e:
+            print(f"    ❌ GitHub 搜索失败: {e}")
+            return []
+    
+    def get_repo_info(self, owner: str, repo: str) -> Optional[Dict]:
+        """
+        获取仓库详细信息
+        
+        Args:
+            owner: 仓库所有者
+            repo: 仓库名称
+            
+        Returns:
+            仓库信息字典
+        """
+        url = f"{self.base_url}/repos/{owner}/{repo}"
+        
+        try:
+            response = requests.get(
+                url,
+                headers=self.headers,
+                timeout=10
+            )
+            
+            if response.status_code == 404:
+                return None
+            
+            response.raise_for_status()
+            data = response.json()
+            
+            return {
+                "name": data["name"],
+                "full_name": data["full_name"],
+                "html_url": data["html_url"],
+                "description": data.get("description", ""),
+                "stars": data["stargazers_count"],
+                "forks": data["forks_count"],
+                "language": data.get("language", ""),
+                "size": data["size"],
+                "created_at": data["created_at"],
+                "updated_at": data["updated_at"],
+                "pushed_at": data["pushed_at"],
+                "topics": data.get("topics", []),
+                "archived": data.get("archived", False),
+                "license": data.get("license", {}).get("name", None) if data.get("license") else None,
+                "open_issues": data.get("open_issues_count", 0),
+            }
+            
+        except Exception as e:
+            print(f"    ❌ 获取仓库信息失败: {e}")
+            return None
+
+
+def construct_search_query(paper_data: Dict) -> str:
+    """
+    根据论文数据构造 GitHub 搜索查询
+    
+    Args:
+        paper_data: 论文元数据
+        
+    Returns:
+        搜索查询字符串
+    """
+    title = paper_data.get("title", "")
+    
+    # 提取主要关键词（去掉冠词、介词等）
+    stop_words = {"a", "an", "the", "of", "for", "with", "on", "in", "to", "and", "or"}
+    keywords = [
+        word for word in title.split()
+        if word.lower() not in stop_words and len(word) > 2
+    ][:5]  # 取前5个关键词
+    
+    # 构造查询
+    query_parts = [f'"{title}"']
+    
+    # 添加 in:name,description,readme 来提高相关性
+    query = f'{" ".join(query_parts)} in:name,description,readme'
+    
+    return query
+
+
+def filter_implementations_with_llm(
+    paper_data: Dict,
+    candidates: List[Dict]
+) -> List[Dict]:
+    """
+    使用 LLM 过滤出真正实现了论文的仓库
+    
+    Args:
+        paper_data: 论文元数据
+        candidates: 候选仓库列表
+        
+    Returns:
+        过滤后的仓库列表，按相关性排序
+    """
+    if not candidates:
+        return []
+    
+    # 构造候选列表文本
+    candidates_text = []
+    for i, repo in enumerate(candidates):
+        text = f"{i+1}. {repo['full_name']} - {repo['html_url']}\n"
+        text += f"   Description: {repo['description']}\n"
+        text += f"   Stars: {repo['stars']}, Language: {repo['language']}"
+        candidates_text.append(text)
+    
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a classifier that identifies if GitHub repositories are implementations of a specific research paper. Reply in JSON format."
+        },
+        {
+            "role": "user",
+            "content": f"""Paper title: "{paper_data.get('title', '')}"
+Year: {paper_data.get('year', '')}
+Conference: {paper_data.get('conference', '')}
+Abstract: "{paper_data.get('abstract', '')[:500]}..."
+
+Here are GitHub repositories from search results:
+{chr(10).join(candidates_text)}
+
+For each repository, determine if it is an implementation of this paper (or a very close re-implementation).
+Reply in JSON format with an array of objects:
+{{
+  "repositories": [
+    {{
+      "full_name": "<repo full name>",
+      "url": "<repo url>",
+      "is_implementation": true/false,
+      "relevance": 0.0-1.0,
+      "reason": "brief explanation"
+    }},
+    ...
+  ]
+}}"""
+        }
+    ]
+    
+    response = llm_client.call_json(messages, temperature=0.1)
+    
+    if not response or "repositories" not in response:
+        print(f"    ⚠️  LLM 响应格式错误")
+        return []
+    
+    # 过滤并排序
+    filtered = []
+    for item in response["repositories"]:
+        if item.get("is_implementation", False) and item.get("relevance", 0) > 0.3:
+            # 找到对应的原始仓库数据
+            for candidate in candidates:
+                if candidate["full_name"] == item["full_name"]:
+                    filtered.append({
+                        **candidate,
+                        "relevance": item["relevance"],
+                        "reason": item.get("reason", "")
+                    })
+                    break
+    
+    # 按相关性排序
+    filtered.sort(key=lambda x: x["relevance"], reverse=True)
+    
+    return filtered
+
+
+def search_github_implementations(
+    paper_data: Dict,
+    max_results: int = 10,
+    use_llm: bool = True
+) -> Dict:
+    """
+    在 GitHub 上搜索论文的实现
+    
+    Args:
+        paper_data: 论文元数据
+        max_results: 最大搜索结果数
+        use_llm: 是否使用 LLM 过滤
+        
+    Returns:
+        搜索结果字典
+    """
+    print(f"  🔍 在 GitHub 搜索实现...")
+    
+    searcher = GitHubSearcher()
+    
+    # 构造查询
+    query = construct_search_query(paper_data)
+    print(f"    查询: {query}")
+    
+    # 搜索
+    candidates = searcher.search_repositories(query, max_results)
+    print(f"    找到 {len(candidates)} 个候选仓库")
+    
+    if not candidates:
+        return {
+            "success": False,
+            "unofficial_repos": [],
+            "source": "github_search"
+        }
+    
+    # LLM 过滤
+    if use_llm:
+        filtered = filter_implementations_with_llm(paper_data, candidates)
+        print(f"    LLM 过滤后保留 {len(filtered)} 个实现")
+        
+        if filtered:
+            for i, repo in enumerate(filtered[:3], 1):
+                print(f"      {i}. {repo['full_name']} (相关性: {repo['relevance']:.2f})")
+                print(f"         {repo.get('reason', 'N/A')}")
+    else:
+        filtered = candidates
+    
+    return {
+        "success": bool(filtered),
+        "unofficial_repos": [repo["html_url"] for repo in filtered],
+        "repo_details": filtered,
+        "source": "github_search"
+    }
+
+
+if __name__ == "__main__":
+    # 测试
+    from config import PAPERS_ROOT_DIR
+    from utils import get_all_paper_dirs, load_paper_data
+    
+    print("测试 GitHub 搜索器...")
+    paper_dirs = get_all_paper_dirs(PAPERS_ROOT_DIR)
+    
+    if paper_dirs:
+        test_dir = paper_dirs[0]
+        print(f"\n测试论文: {os.path.basename(test_dir)}")
+        
+        paper_data = load_paper_data(test_dir)
+        if paper_data:
+            result = search_github_implementations(paper_data, max_results=5, use_llm=True)
+            print(f"\n结果: {result}")

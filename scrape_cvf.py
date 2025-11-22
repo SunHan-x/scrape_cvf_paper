@@ -4,24 +4,10 @@ import pandas as pd
 import time
 import os
 import argparse
-import re
 from urllib.parse import urljoin
-from excel_formatter import save_papers_to_excel, DEFAULT_COLUMN_CONFIG
 
 # Base URL
 BASE_URL = "https://openaccess.thecvf.com/"
-
-def clean_text(text):
-    """
-    Remove illegal characters for Excel cells.
-    Excel doesn't allow certain control characters.
-    """
-    if not text:
-        return ""
-    # Remove control characters except tab, newline, and carriage return
-    # Excel allows: 0x09 (tab), 0x0A (newline), 0x0D (carriage return)
-    cleaned = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F-\x9F]', '', text)
-    return cleaned
 
 def get_paper_details(paper_url):
     """
@@ -39,9 +25,6 @@ def get_paper_details(paper_url):
         # Remove the leading "Abstract" label if present
         if abstract.startswith("Abstract"):
             abstract = abstract[len("Abstract"):].strip()
-        
-        # Clean illegal characters for Excel
-        abstract = clean_text(abstract)
         
         # Extract PDF URL
         pdf_url = ""
@@ -189,7 +172,6 @@ def scrape_day(url, year, day, conference, download_pdfs=False, pdf_dir=""):
             continue
             
         title = a_tag.get_text(strip=True)
-        title = clean_text(title)  # Clean illegal characters
         relative_link = a_tag['href']
         full_link = urljoin(BASE_URL, relative_link)
         
@@ -314,68 +296,6 @@ def main():
     conference_str = '_'.join(conferences)
     output_file = os.path.join(args.output_dir, f"{conference_str}_{args.start_year}_{args.end_year}.xlsx")
     
-    # Check for existing progress
-    all_papers = []
-    papers_by_sheet = {}
-    completed_sheets = set()
-    
-    if os.path.exists(output_file):
-        print(f"Found existing file: {output_file}")
-        print("Loading previous progress...")
-        try:
-            excel_file = pd.ExcelFile(output_file)
-            for sheet_name in excel_file.sheet_names:
-                df = pd.read_excel(output_file, sheet_name=sheet_name)
-                
-                # Validate sheet data
-                is_valid = True
-                validation_messages = []
-                
-                # Check if sheet is empty
-                if df.empty:
-                    validation_messages.append("Sheet is empty")
-                    is_valid = False
-                else:
-                    # Check for required columns
-                    required_columns = ["Conference", "Year", "Title", "Abstract", "URL", "PDF_URL"]
-                    missing_columns = [col for col in required_columns if col not in df.columns]
-                    if missing_columns:
-                        validation_messages.append(f"Missing columns: {', '.join(missing_columns)}")
-                        is_valid = False
-                    
-                    # Check for rows with empty critical fields (Title should not be empty)
-                    empty_titles = df["Title"].isna().sum() if "Title" in df.columns else len(df)
-                    if empty_titles > 0:
-                        validation_messages.append(f"{empty_titles} rows with empty titles")
-                        is_valid = False
-                    
-                    # Check for completely empty columns (excluding PDF_Path which might be empty)
-                    for col in ["Conference", "Year", "Title", "URL"]:
-                        if col in df.columns and df[col].isna().all():
-                            validation_messages.append(f"Column '{col}' is completely empty")
-                            is_valid = False
-                
-                if is_valid:
-                    papers_list = df.to_dict('records')
-                    papers_by_sheet[sheet_name] = papers_list
-                    all_papers.extend(papers_list)
-                    completed_sheets.add(sheet_name)
-                    print(f"  ✓ {sheet_name}: {len(df)} papers (valid)")
-                else:
-                    print(f"  ✗ {sheet_name}: Invalid - {'; '.join(validation_messages)}")
-                    print(f"    This sheet will be re-scraped")
-            
-            if completed_sheets:
-                print(f"\nLoaded {len(completed_sheets)} valid sheets")
-                print(f"Total papers loaded: {len(all_papers)}")
-            else:
-                print("\nNo valid sheets found, starting from scratch...")
-            print()
-        except Exception as e:
-            print(f"Error loading existing file: {e}")
-            print("Starting from scratch...")
-            print()
-    
     print(f"Configuration:")
     print(f"  Conferences: {', '.join(conferences)}")
     print(f"  Years: {args.start_year} - {args.end_year}")
@@ -386,20 +306,16 @@ def main():
         print(f"  PDF directory: {args.pdf_dir}")
     print()
     
+    all_papers = []
+    papers_by_sheet = {}  # Dictionary to organize papers by sheet name (conference_year)
+    
     for conference in conferences:
         for year in years:
-            sheet_name = f"{conference}_{year}"
-            
-            # Skip if already completed
-            if sheet_name in completed_sheets:
-                print(f"Skipping {conference} {year} (already completed)")
-                continue
-            
-            print(f"Starting {conference} {year}...")
             year_papers = scrape_year(year, conference, args.download_pdf, args.pdf_dir)
             all_papers.extend(year_papers)
             
             # Organize papers by sheet name
+            sheet_name = f"{conference}_{year}"
             if sheet_name not in papers_by_sheet:
                 papers_by_sheet[sheet_name] = []
             papers_by_sheet[sheet_name].extend(year_papers)
@@ -407,21 +323,16 @@ def main():
             print(f"Finished {conference} {year}. Total papers so far: {len(all_papers)}")
             
             # Save intermediate results with multiple sheets
-            try:
-                success = save_papers_to_excel(output_file, papers_by_sheet)
-                if success:
-                    print(f"Saved progress to {output_file}")
-                    completed_sheets.add(sheet_name)
-                else:
-                    print(f"Failed to save progress!")
-            except Exception as e:
-                print(f"Error saving to Excel: {e}")
-                print(f"Progress for {sheet_name} may be lost!")
+            with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+                for sheet_name, papers in papers_by_sheet.items():
+                    df = pd.DataFrame(papers)
+                    df.to_excel(writer, sheet_name=sheet_name, index=False)
+            print(f"Saved progress to {output_file}")
             print()
 
     print("Scraping complete!")
     print(f"Total papers scraped: {len(all_papers)}")
-    print(f"Sheets created: {', '.join(sorted(papers_by_sheet.keys()))}")
+    print(f"Sheets created: {', '.join(papers_by_sheet.keys())}")
     print(f"Data saved to {output_file}")
 
 if __name__ == "__main__":

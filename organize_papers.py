@@ -21,10 +21,11 @@ def sanitize_filename(filename):
 def copy_pdf(pdf_path_in_xlsx, save_path, pdf_dir='pdf'):
     """
     Copy PDF file from pdf directory to specified path.
+    PDF will always be named 'paper.pdf' in the destination.
     """
     try:
         if os.path.exists(save_path):
-            print(f"    PDF already exists: {os.path.basename(save_path)}")
+            print(f"    PDF already exists: paper.pdf")
             return True
         
         # Check if PDF_Path column has a value
@@ -37,7 +38,7 @@ def copy_pdf(pdf_path_in_xlsx, save_path, pdf_dir='pdf'):
         
         # Copy the file
         shutil.copy2(source_path, save_path)
-        print(f"    Copied: {os.path.basename(save_path)}")
+        print(f"    Copied: paper.pdf")
         return True
         
     except Exception as e:
@@ -67,8 +68,9 @@ def organize_papers(xlsx_file, output_dir, copy_pdfs=True, pdf_dir='pdf'):
     ├─CVPR/
     │  ├─2020/
     │  │  ├─paper_title_1/
-    │  │  │  ├─paper_title_1.json
-    │  │  │  └─paper_title_1.pdf
+    │  │  │  ├─paper_data.json
+    │  │  │  ├─paper.pdf
+    │  │  │  └─github_links.json
     """
     print(f"Reading Excel file: {xlsx_file}")
     
@@ -109,19 +111,25 @@ def organize_papers(xlsx_file, output_dir, copy_pdfs=True, pdf_dir='pdf'):
             paper_dir = os.path.join(output_dir, conference, year, safe_title)
             os.makedirs(paper_dir, exist_ok=True)
             
-            # Create JSON metadata file
-            json_path = os.path.join(paper_dir, f"{safe_title}.json")
+            # Create JSON metadata file (paper_data.json)
+            json_path = os.path.join(paper_dir, "paper_data.json")
             metadata = create_paper_metadata(row)
             
             with open(json_path, 'w', encoding='utf-8') as f:
                 json.dump(metadata, f, indent=2, ensure_ascii=False)
             
-            print(f"  [{idx+1}/{len(df)}] {safe_title[:50]}...")
-            print(f"    Created metadata: {json_path}")
+            # Create empty github_links.json
+            github_links_path = os.path.join(paper_dir, "github_links.json")
+            with open(github_links_path, 'w', encoding='utf-8') as f:
+                json.dump({}, f, indent=2)
             
-            # Copy PDF if requested and path is available
+            print(f"  [{idx+1}/{len(df)}] {safe_title[:50]}...")
+            print(f"    Created metadata: paper_data.json")
+            print(f"    Created empty: github_links.json")
+            
+            # Copy PDF if requested and path is available (always named paper.pdf)
             if copy_pdfs and pdf_path_in_xlsx:
-                pdf_path = os.path.join(paper_dir, f"{safe_title}.pdf")
+                pdf_path = os.path.join(paper_dir, "paper.pdf")
                 if copy_pdf(pdf_path_in_xlsx, pdf_path, pdf_dir):
                     total_copied += 1
             elif not pdf_path_in_xlsx:
