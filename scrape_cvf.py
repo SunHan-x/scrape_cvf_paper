@@ -15,6 +15,53 @@ BASE_URL = "https://openaccess.thecvf.com/"
 # Global list to track failed papers
 failed_papers = []
 
+def get_progress_file(base_dir, conference, start_year, end_year):
+    """Get the progress file path."""
+    return os.path.join(base_dir, f"progress_{conference}_{start_year}_{end_year}.json")
+
+def load_progress(base_dir, conference, start_year, end_year):
+    """Load progress from file if exists."""
+    progress_file = get_progress_file(base_dir, conference, start_year, end_year)
+    if os.path.exists(progress_file):
+        try:
+            with open(progress_file, 'r', encoding='utf-8') as f:
+                progress = json.load(f)
+                print(f"✓ Loaded progress from {progress_file}")
+                print(f"  Completed years: {progress.get('completed_years', [])}")
+                print(f"  Completed papers: {progress.get('total_papers_scraped', 0)}")
+                return progress
+        except Exception as e:
+            print(f"Warning: Could not load progress file: {e}")
+    return {
+        "completed_years": [],
+        "papers_by_year": {},
+        "failed_papers": [],
+        "total_papers_scraped": 0
+    }
+
+def save_progress(base_dir, conference, start_year, end_year, progress):
+    """Save progress to file."""
+    progress_file = get_progress_file(base_dir, conference, start_year, end_year)
+    try:
+        with open(progress_file, 'w', encoding='utf-8') as f:
+            json.dump(progress, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Warning: Could not save progress: {e}")
+
+def is_paper_already_scraped(paper_dir):
+    """Check if a paper has already been successfully scraped."""
+    # Check if paper directory exists and has required files
+    if not os.path.exists(paper_dir):
+        return False
+    
+    paper_data_path = os.path.join(paper_dir, "paper_data.json")
+    github_links_path = os.path.join(paper_dir, "github_links.json")
+    pdf_path = os.path.join(paper_dir, "paper.pdf")
+    
+    # Consider paper scraped if paper_data.json exists
+    # PDF and github_links are optional (PDF might not be available)
+    return os.path.exists(paper_data_path)
+
 def sanitize_filename(filename):
     """
     Sanitize filename by removing invalid characters.
