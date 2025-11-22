@@ -8,12 +8,18 @@ import argparse
 from urllib.parse import urljoin
 from datetime import datetime
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 # Base URL
 BASE_URL = "https://openaccess.thecvf.com/"
 
 # Global list to track failed papers
 failed_papers = []
+
+# Thread lock for thread-safe operations
+failed_papers_lock = threading.Lock()
+progress_lock = threading.Lock()
 
 def get_progress_file(base_dir, conference, start_year, end_year):
     """Get the progress file path."""
@@ -163,9 +169,9 @@ def download_pdf(pdf_url, save_dir, filename):
         print(f"    {error_msg}")
         return "", error_msg
 
-def retry_failed_papers(failed_list, year_dir, conference, year):
+def retry_failed_papers(failed_list, year_dir, conference, year, max_workers=3):
     """
-    Retry fetching details for failed papers.
+    Retry fetching details for failed papers with multithreading.
     Returns updated list of papers and still-failed papers.
     """
     print(f"\n  === Retrying {len(failed_list)} failed papers for {year} ===")
@@ -173,8 +179,9 @@ def retry_failed_papers(failed_list, year_dir, conference, year):
     recovered_papers = []
     still_failed = []
     
-    for i, failed_item in enumerate(failed_list):
-        print(f"  [Retry {i+1}/{len(failed_list)}] {failed_item['title'][:50]}...")
+    def retry_single_paper(failed_item, idx, total):
+        """Retry a single failed paper."""
+        print(f"  [Retry {idx+1}/{total}] {failed_item['title'][:50]}...")
         
         title = failed_item['title']
         full_link = failed_item['url']
@@ -221,16 +228,16 @@ def retry_failed_papers(failed_list, year_dir, conference, year):
                 error_details.append("No PDF URL found")
         
         if has_error:
-            still_failed.append({
+            return None, {
                 "conference": conference.upper(),
                 "year": year,
                 "title": title,
                 "url": full_link,
                 "errors": error_details,
                 "retry_attempt": True
-            })
+            }
         else:
-            recovered_papers.append({
+            return {
                 "Conference": conference.upper(),
                 "Year": year,
                 "Title": title,
@@ -238,9 +245,24 @@ def retry_failed_papers(failed_list, year_dir, conference, year):
                 "Abstract": abstract,
                 "URL": full_link,
                 "PDF_URL": pdf_url
-            })
+            }, None
+    
+    # Use ThreadPoolExecutor for retry (fewer workers to be more careful)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_paper = {
+            executor.submit(retry_single_paper, failed_item, i, len(failed_list)): i
+            for i, failed_item in enumerate(failed_list)
+        }
         
-        time.sleep(0.5)
+        for future in as_completed(future_to_paper):
+            try:
+                recovered, failed = future.result()
+                if recovered:
+                    recovered_papers.append(recovered)
+                if failed:
+                    still_failed.append(failed)
+            except Exception as e:
+                print(f"    Error during retry: {e}")
     
     print(f"  Retry complete: {len(recovered_papers)} recovered, {len(still_failed)} still failed")
     return recovered_papers, still_failed
@@ -305,7 +327,7 @@ def save_failure_report(failed_list, base_dir, conference, start_year, end_year)
     except Exception as e:
         print(f"\n✗ Error saving failure report: {e}")
 
-def scrape_year(year, conference, base_dir="CVPR"):
+def scrape_year(year, conference, base_dir="CVPR", max_workers=5):
     """
     Scrapes all papers for a specific year and conference.
     """
@@ -332,29 +354,30 @@ def scrape_year(year, conference, base_dir="CVPR"):
         if len(dt_elements) > 0:
             # day=all works, use it
             print(f"  Using day=all for {conference.upper()} {year}")
-            all_papers = scrape_day(url_all, year, "all", conference, year_dir, year_failed_papers)
+            all_papers = scrape_day(url_all, year, "all", conference, year_dir, year_failed_papers, max_workers)
         else:
             # day=all returned no papers, need to try individual days
             print(f"  day=all returned no papers, trying to find individual days...")
             all_papers = []
-            all_papers.extend(scrape_individual_days(year, conference, year_dir, year_failed_papers))
+            all_papers.extend(scrape_individual_days(year, conference, year_dir, year_failed_papers, max_workers))
             
     except Exception as e:
         print(f"  day=all failed: {e}, trying to find individual days...")
         all_papers = []
-        all_papers.extend(scrape_individual_days(year, conference, year_dir, year_failed_papers))
+        all_papers.extend(scrape_individual_days(year, conference, year_dir, year_failed_papers, max_workers))
     
     # Retry failed papers
     if year_failed_papers:
-        recovered_papers, still_failed = retry_failed_papers(year_failed_papers, year_dir, conference, year)
+        recovered_papers, still_failed = retry_failed_papers(year_failed_papers, year_dir, conference, year, max_workers)
         all_papers.extend(recovered_papers)
         
         # Add still-failed papers to global failed_papers list
-        failed_papers.extend(still_failed)
+        with failed_papers_lock:
+            failed_papers.extend(still_failed)
     
     return all_papers
 
-def scrape_individual_days(year, conference, year_dir, year_failed_papers):
+def scrape_individual_days(year, conference, year_dir, year_failed_papers, max_workers=5):
     """
     Helper function to scrape individual days when day=all doesn't work.
     """
@@ -378,22 +401,111 @@ def scrape_individual_days(year, conference, year_dir, year_failed_papers):
             for link in day_links:
                 day_param = link.split('day=')[1].split('&')[0] if '&' in link.split('day=')[1] else link.split('day=')[1]
                 full_url = urljoin(BASE_URL, link)
-                papers = scrape_day(full_url, year, day_param, conference, year_dir, year_failed_papers)
+                papers = scrape_day(full_url, year, day_param, conference, year_dir, year_failed_papers, max_workers)
                 all_papers.extend(papers)
             return all_papers
         else:
             print(f"  Warning: Could not find day links for {conference.upper()} {year}")
             url_all = f"{BASE_URL}{conference.upper()}{year}?day=all"
-            return scrape_day(url_all, year, "all", conference, year_dir, year_failed_papers)
+            return scrape_day(url_all, year, "all", conference, year_dir, year_failed_papers, max_workers)
             
     except Exception as e:
         print(f"  Error accessing main page: {e}")
         url_all = f"{BASE_URL}{conference.upper()}{year}?day=all"
-        return scrape_day(url_all, year, "all", conference, year_dir, year_failed_papers)
+        return scrape_day(url_all, year, "all", conference, year_dir, year_failed_papers, max_workers)
 
-def scrape_day(url, year, day, conference, year_dir, year_failed_papers):
+def scrape_single_paper(dt, i, total, year, conference, year_dir, year_failed_papers):
     """
-    Scrapes papers from a specific day/page.
+    Scrape a single paper (thread-safe function).
+    """
+    a_tag = dt.find('a')
+    if not a_tag:
+        return None
+        
+    title = a_tag.get_text(strip=True)
+    relative_link = a_tag['href']
+    full_link = urljoin(BASE_URL, relative_link)
+    
+    # Create paper directory
+    safe_title = sanitize_filename(title)
+    paper_dir = os.path.join(year_dir, safe_title)
+    
+    # Check if paper already scraped
+    if is_paper_already_scraped(paper_dir):
+        print(f"  [{i+1}/{total}] Skipping (already scraped): {title[:50]}...")
+        
+        # Load existing data for Excel
+        try:
+            paper_data_path = os.path.join(paper_dir, "paper_data.json")
+            with open(paper_data_path, 'r', encoding='utf-8') as f:
+                existing_data = json.load(f)
+                return existing_data
+        except Exception as e:
+            print(f"    Warning: Could not load existing data: {e}, re-scraping...")
+    
+    print(f"  [{i+1}/{total}] Fetching details for: {title[:50]}...")
+    authors, abstract, pdf_url, error = get_paper_details(full_link)
+    
+    has_error = False
+    error_details = []
+    
+    if error:
+        has_error = True
+        error_details.append(f"Details fetch failed: {error}")
+    
+    # Prepare paper info
+    paper_info = {
+        "Conference": conference.upper(),
+        "Year": year,
+        "Title": title,
+        "Authors": authors,
+        "Abstract": abstract,
+        "URL": full_link,
+        "PDF_URL": pdf_url
+    }
+    
+    # Save paper data and create github_links.json
+    if not save_paper_data(paper_info, paper_dir):
+        has_error = True
+        error_details.append("Failed to save paper_data.json")
+    
+    # Download PDF if available
+    pdf_error = None
+    if pdf_url:
+        _, pdf_error = download_pdf(pdf_url, paper_dir, title)
+        if pdf_error:
+            has_error = True
+            error_details.append(pdf_error)
+    else:
+        if not error:  # Only mark as warning if detail fetch succeeded but no PDF URL
+            print(f"    Warning: No PDF URL found for this paper")
+    
+    # Track failures (thread-safe)
+    if has_error:
+        with failed_papers_lock:
+            year_failed_papers.append({
+                "conference": conference.upper(),
+                "year": year,
+                "title": title,
+                "url": full_link,
+                "errors": error_details,
+                "retry_attempt": False
+            })
+        print(f"    ⚠ Paper had errors, will retry later")
+    
+    return {
+        "Conference": conference.upper(),
+        "Year": year,
+        "Title": title,
+        "Authors": authors,
+        "Abstract": abstract,
+        "URL": full_link,
+        "PDF_URL": pdf_url
+    }
+
+def scrape_day(url, year, day, conference, year_dir, year_failed_papers, max_workers=5):
+    """
+    Scrapes papers from a specific day/page with multithreading.
     """
     print(f"  Fetching {day} for {year}...")
     
@@ -412,81 +524,24 @@ def scrape_day(url, year, day, conference, year_dir, year_failed_papers):
     dt_elements = soup.find_all('dt', class_='ptitle')
     
     print(f"  Found {len(dt_elements)} papers for {year} {day}.")
+    print(f"  Using {max_workers} threads for parallel processing...")
     
-    for i, dt in enumerate(dt_elements):
-        a_tag = dt.find('a')
-        if not a_tag:
-            continue
-            
-        title = a_tag.get_text(strip=True)
-        relative_link = a_tag['href']
-        full_link = urljoin(BASE_URL, relative_link)
-        
-        print(f"  [{i+1}/{len(dt_elements)}] Fetching details for: {title[:50]}...")
-        authors, abstract, pdf_url, error = get_paper_details(full_link)
-        
-        has_error = False
-        error_details = []
-        
-        if error:
-            has_error = True
-            error_details.append(f"Details fetch failed: {error}")
-        
-        # Create paper directory
-        safe_title = sanitize_filename(title)
-        paper_dir = os.path.join(year_dir, safe_title)
-        
-        # Prepare paper info
-        paper_info = {
-            "Conference": conference.upper(),
-            "Year": year,
-            "Title": title,
-            "Authors": authors,
-            "Abstract": abstract,
-            "URL": full_link,
-            "PDF_URL": pdf_url
+    # Use ThreadPoolExecutor for parallel processing
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        future_to_dt = {
+            executor.submit(scrape_single_paper, dt, i, len(dt_elements), year, conference, year_dir, year_failed_papers): i
+            for i, dt in enumerate(dt_elements)
         }
         
-        # Save paper data and create github_links.json
-        if not save_paper_data(paper_info, paper_dir):
-            has_error = True
-            error_details.append("Failed to save paper_data.json")
-        
-        # Download PDF if available
-        pdf_error = None
-        if pdf_url:
-            _, pdf_error = download_pdf(pdf_url, paper_dir, title)
-            if pdf_error:
-                has_error = True
-                error_details.append(pdf_error)
-        else:
-            if not error:  # Only mark as warning if detail fetch succeeded but no PDF URL
-                print(f"    Warning: No PDF URL found for this paper")
-        
-        # Track failures
-        if has_error:
-            year_failed_papers.append({
-                "conference": conference.upper(),
-                "year": year,
-                "title": title,
-                "url": full_link,
-                "errors": error_details,
-                "retry_attempt": False
-            })
-            print(f"    ⚠ Paper had errors, will retry later")
-        
-        papers_data.append({
-            "Conference": conference.upper(),
-            "Year": year,
-            "Title": title,
-            "Authors": authors,
-            "Abstract": abstract,
-            "URL": full_link,
-            "PDF_URL": pdf_url
-        })
-        
-        # Sleep to be polite
-        time.sleep(0.5)
+        # Collect results as they complete
+        for future in as_completed(future_to_dt):
+            try:
+                paper_data = future.result()
+                if paper_data:
+                    papers_data.append(paper_data)
+            except Exception as e:
+                print(f"    Error processing paper: {e}")
 
     return papers_data
 
@@ -495,18 +550,27 @@ def parse_arguments():
     Parse command line arguments.
     """
     parser = argparse.ArgumentParser(
-        description='Scrape papers from CVF conferences (CVPR, ICCV, WACV, ECCV, ACCV)',
+        description='Scrape papers from CVF conferences (CVPR, ICCV, WACV, ECCV, ACCV) with multithreading support',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Scrape CVPR papers from 2013 to 2025
+  # Scrape CVPR papers from 2013 to 2025 (default: 5 threads)
   python scrape_cvf.py --conference CVPR --start-year 2013 --end-year 2025
   
-  # Scrape CVPR papers from 2020 to 2022
-  python scrape_cvf.py --conference CVPR --start-year 2020 --end-year 2022
+  # Use more threads for faster scraping (recommended: 5-10)
+  python scrape_cvf.py --conference CVPR --start-year 2013 --end-year 2025 --max-workers 10
+  
+  # Use fewer threads if you experience connection issues
+  python scrape_cvf.py --conference CVPR --start-year 2020 --end-year 2022 --max-workers 3
   
   # Specify base directory
   python scrape_cvf.py --conference CVPR --start-year 2013 --end-year 2025 --base-dir data
+
+Note: 
+  - The script supports resume after interruption
+  - Already downloaded papers will be automatically skipped
+  - Failed papers will be retried automatically
+  - Progress is saved after each year
         """
     )
     
@@ -539,11 +603,22 @@ Examples:
         help='Base directory to save papers (default: CVPR)'
     )
     
+    parser.add_argument(
+        '--max-workers', '-w',
+        type=int,
+        default=5,
+        help='Maximum number of worker threads (default: 5, range: 1-20)'
+    )
+    
     args = parser.parse_args()
     
     # Validate year range
     if args.start_year > args.end_year:
         parser.error(f"Start year ({args.start_year}) must be <= end year ({args.end_year})")
+    
+    # Validate max_workers
+    if args.max_workers < 1 or args.max_workers > 20:
+        parser.error(f"max-workers must be between 1 and 20 (got {args.max_workers})")
     
     return args
 
@@ -561,6 +636,15 @@ def main():
     # Create base directory if it doesn't exist
     os.makedirs(base_dir, exist_ok=True)
     
+    # Load progress
+    progress = load_progress(base_dir, conference, args.start_year, args.end_year)
+    completed_years = set(progress.get('completed_years', []))
+    papers_by_year = progress.get('papers_by_year', {})
+    failed_papers = progress.get('failed_papers', [])
+    
+    # Convert string keys back to integers
+    papers_by_year = {int(k): v for k, v in papers_by_year.items()}
+    
     # Generate Excel filename
     excel_file = os.path.join(base_dir, f"CVPR_{args.start_year}_{args.end_year}.xlsx")
     
@@ -569,40 +653,92 @@ def main():
     print(f"  Years: {args.start_year} - {args.end_year}")
     print(f"  Base directory: {base_dir}")
     print(f"  Excel file: {excel_file}")
+    print(f"  Max workers (threads): {args.max_workers}")
+    if completed_years:
+        print(f"  Resuming: {len(completed_years)} years already completed")
     print()
     
     all_papers = []
-    papers_by_year = {}  # Dictionary to organize papers by year
     
-    for year in years:
-        year_papers = scrape_year(year, conference, base_dir)
-        all_papers.extend(year_papers)
+    try:
+        for year in years:
+            # Skip already completed years
+            if year in completed_years:
+                print(f"Skipping {conference} {year} (already completed)")
+                all_papers.extend(papers_by_year.get(year, []))
+                continue
+            
+            print(f"Processing {conference} {year}...")
+            year_papers = scrape_year(year, conference, base_dir, args.max_workers)
+            all_papers.extend(year_papers)
+            
+            # Organize papers by year for Excel sheets
+            papers_by_year[year] = year_papers
+            completed_years.add(year)
+            
+            print(f"Finished {conference} {year}. Total papers: {len(year_papers)}")
+            
+            # Save progress after each year
+            progress_data = {
+                "completed_years": list(completed_years),
+                "papers_by_year": {str(k): v for k, v in papers_by_year.items()},
+                "failed_papers": failed_papers,
+                "total_papers_scraped": len(all_papers),
+                "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            save_progress(base_dir, conference, args.start_year, args.end_year, progress_data)
+            print(f"✓ Progress saved")
+            
+            # Save to Excel with multiple sheets (one per year)
+            try:
+                with pd.ExcelWriter(excel_file, engine='openpyxl') as writer:
+                    for yr, papers in papers_by_year.items():
+                        if papers:  # Only create sheet if there are papers
+                            df = pd.DataFrame(papers)
+                            # Reorder columns
+                            column_order = ["Conference", "Year", "Title", "Authors", "Abstract", "URL", "PDF_URL"]
+                            df = df[column_order]
+                            df.to_excel(writer, sheet_name=str(yr), index=False)
+                print(f"✓ Saved to {excel_file}")
+            except Exception as e:
+                print(f"Error saving Excel file: {e}")
+            print()
+
+    except KeyboardInterrupt:
+        print("\n\n⚠ Scraping interrupted by user!")
+        print("Progress has been saved. You can resume by running the script again.")
         
-        # Organize papers by year for Excel sheets
-        papers_by_year[year] = year_papers
+        # Save current progress
+        progress_data = {
+            "completed_years": list(completed_years),
+            "papers_by_year": {str(k): v for k, v in papers_by_year.items()},
+            "failed_papers": failed_papers,
+            "total_papers_scraped": len(all_papers),
+            "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        save_progress(base_dir, conference, args.start_year, args.end_year, progress_data)
+        return
+    
+    except Exception as e:
+        print(f"\n\n✗ Unexpected error: {e}")
+        print("Progress has been saved. You can resume by running the script again.")
         
-        print(f"Finished {conference} {year}. Total papers: {len(year_papers)}")
-        
-        # Save to Excel with multiple sheets (one per year)
-        try:
-            with pd.ExcelWriter(excel_file, engine='openpyxl') as writer:
-                for yr, papers in papers_by_year.items():
-                    if papers:  # Only create sheet if there are papers
-                        df = pd.DataFrame(papers)
-                        # Reorder columns
-                        column_order = ["Conference", "Year", "Title", "Authors", "Abstract", "URL", "PDF_URL"]
-                        df = df[column_order]
-                        df.to_excel(writer, sheet_name=str(yr), index=False)
-            print(f"Saved progress to {excel_file}")
-        except Exception as e:
-            print(f"Error saving Excel file: {e}")
-        print()
+        # Save current progress
+        progress_data = {
+            "completed_years": list(completed_years),
+            "papers_by_year": {str(k): v for k, v in papers_by_year.items()},
+            "failed_papers": failed_papers,
+            "total_papers_scraped": len(all_papers),
+            "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        save_progress(base_dir, conference, args.start_year, args.end_year, progress_data)
+        raise
 
     print("\n" + "="*70)
     print("Scraping complete!")
     print("="*70)
     print(f"Total papers scraped: {len(all_papers)}")
-    print(f"Sheets created: {', '.join(str(y) for y in papers_by_year.keys())}")
+    print(f"Sheets created: {', '.join(str(y) for y in sorted(papers_by_year.keys()))}")
     print(f"Data saved to {excel_file}")
     print(f"Papers organized in directory structure under: {base_dir}/")
     
@@ -611,6 +747,15 @@ def main():
         save_failure_report(failed_papers, base_dir, conference, args.start_year, args.end_year)
     else:
         print("\n✓ All papers scraped successfully with no failures!")
+    
+    # Delete progress file on successful completion
+    try:
+        progress_file = get_progress_file(base_dir, conference, args.start_year, args.end_year)
+        if os.path.exists(progress_file):
+            os.remove(progress_file)
+            print(f"✓ Progress file removed (scraping completed)")
+    except Exception as e:
+        print(f"Warning: Could not remove progress file: {e}")
 
 if __name__ == "__main__":
     main()
