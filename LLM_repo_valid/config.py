@@ -2,32 +2,38 @@
 配置文件 - 存储API密钥和其他配置参数
 """
 
-# ==================== API 配置 ====================
+import os
+from dotenv import load_dotenv
+
+# 加载 .env 文件
+load_dotenv()
+
+# ====================  API 配置 ====================
 # 当前使用的 LLM 提供商: "aliyun" | "openai" | "deepseek" | "moonshot" | "zenmux"
 LLM_PROVIDER = "aliyun"  # 使用阿里云百炼
 
 # 阿里云百炼 (Qwen) 配置 - 推荐使用
-ALIYUN_API_KEY = "sk-78c27d13e7e14434b353402d73069882"  # 从百炼控制台获取
+ALIYUN_API_KEY = os.getenv("ALIYUN_API_KEY", "your_aliyun_api_key_here")
 ALIYUN_API_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
 ALIYUN_MODEL = "qwen-plus"  # 可选: qwen-plus, qwen-turbo, qwen-max
 
 # Zenmux (Gemini) 配置
-ZENMUX_API_KEY = "sk-ai-v1-21c2dcadcd331919551c1d82c9fe29bdb0fe155d093085923fa5fed2779e2954"
+ZENMUX_API_KEY = os.getenv("ZENMUX_API_KEY", "your_zenmux_api_key_here")
 ZENMUX_API_URL = "https://zenmux.ai/v1/chat/completions"
 ZENMUX_MODEL = "gemini-3-pro-preview-free"
 
 # OpenAI 配置
-OPENAI_API_KEY = "your_openai_api_key_here"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "your_openai_api_key_here")
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_MODEL = "gpt-4o-mini"
 
 # DeepSeek 配置
-DEEPSEEK_API_KEY = "your_deepseek_api_key_here"
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "your_deepseek_api_key_here")
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 DEEPSEEK_MODEL = "deepseek-chat"
 
 # Moonshot (Kimi) 配置
-MOONSHOT_API_KEY = "your_moonshot_api_key_here"
+MOONSHOT_API_KEY = os.getenv("MOONSHOT_API_KEY", "your_moonshot_api_key_here")
 MOONSHOT_API_URL = "https://api.moonshot.cn/v1/chat/completions"
 MOONSHOT_MODEL = "moonshot-v1-8k"
 
@@ -59,7 +65,7 @@ else:
     GEMINI_MODEL = ALIYUN_MODEL
 
 # GitHub API 配置
-GITHUB_API_TOKEN = "your_github_token_here"  # 可选，但有token可以提高限速
+GITHUB_API_TOKEN = os.getenv("GITHUB_API_TOKEN", "your_github_token_here")  # 强烈建议配置！无token每小时只能请求60次，有token可达5000次
 
 # ==================== 路径配置 ====================
 PAPERS_ROOT_DIR = "/home/sunhan/scrape_cvf/CVPR_PAPERS_TEST"
@@ -111,6 +117,11 @@ TYPICAL_IMPL_DIRS = [
     'models', 'src', 'lib', 'scripts', 'configs',
     'train', 'test', 'inference', 'utils'
 ]
+
+# 深度分析配置
+MAX_DEPTH = 3  # 遍历仓库目录的最大深度
+MAX_FILES_TO_ANALYZE = 20  # 分析的最大文件数
+SAMPLE_FILE_LINES = 100  # 每个文件采样的行数
 
 # ==================== LLM 调用配置 ====================
 LLM_TIMEOUT = 30  # 超时时间(秒)

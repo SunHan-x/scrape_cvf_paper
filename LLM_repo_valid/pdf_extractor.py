@@ -47,49 +47,154 @@ def extract_text_from_pdf(pdf_path: str) -> Optional[str]:
         return None
 
 
-def extract_urls_from_text(text: str) -> List[str]:
+def extract_url_patterns_with_context(text: str, context_chars: int = 50) -> List[Dict]:
     """
-    从文本中提取所有 URL，处理换行断开的 URL
+    从文本中提取 URL 模式及其上下文
     
     Args:
         text: 文本内容
+        context_chars: 上下文字符数
+        
+    Returns:
+        包含 URL 模式和上下文的字典列表
+    """
+    # 查找所有可能的 URL 起始位置 (http:// 或 https://)
+    url_start_pattern = r'https?://'
+    url_patterns = []
+    
+    for match in re.finditer(url_start_pattern, text, re.IGNORECASE):
+        start_pos = match.start()
+        url_start = match.group()
+        
+        # 提取 URL 起始位置之前和之后的内容
+        context_start = max(0, start_pos - context_chars)
+        # 粗略估计 URL 可能的结束位置（最多200个字符）
+        url_end_estimate = min(len(text), start_pos + 200)
+        context_end = min(len(text), url_end_estimate + context_chars)
+        
+        # 提取完整上下文
+        full_context = text[context_start:context_end]
+        
+        # 提取 URL 起始后的内容（用于 LLM 分析）
+        url_candidate = text[start_pos:url_end_estimate]
+        
+        url_patterns.append({
+            "url_start": url_start,
+            "position": start_pos,
+            "before_context": text[context_start:start_pos],
+            "url_candidate": url_candidate,
+            "after_context": text[url_end_estimate:context_end],
+            "full_context": full_context
+        })
+    
+    return url_patterns
+
+
+def extract_urls_with_llm(url_patterns: List[Dict]) -> List[str]:
+    """
+    使用 LLM 从 URL 模式和上下文中精确识别真正的 URL
+    
+    Args:
+        url_patterns: URL 模式和上下文列表
+        
+    Returns:
+        精确的 URL 列表
+    """
+    if not url_patterns:
+        return []
+    
+    print(f"    🤖 使用 LLM 从 {len(url_patterns)} 个候选中精确提取 URL...")
+    
+    # 构造输入
+    patterns_text = []
+    for i, pattern in enumerate(url_patterns, 1):
+        patterns_text.append(
+            f"{i}. 上下文:\n"
+            f"   前: ...{pattern['before_context'][-30:]}\n"
+            f"   URL候选: {pattern['url_start']}[这里是URL]\n"
+            f"   后: {pattern['after_context'][:30]}...\n"
+            f"   完整候选: {pattern['url_candidate'][:100]}..."
+        )
+    
+    messages = [
+        {
+            "role": "system",
+            "content": "你是一个 URL 提取专家。从 PDF 文本中精确识别 GitHub/GitLab 等代码仓库的完整 URL。注意处理换行、多余字符等问题。"
+        },
+        {
+            "role": "user",
+            "content": f"""从以下 PDF 文本片段中提取完整的代码仓库 URL（GitHub、GitLab等）。
+
+{chr(10).join(patterns_text)}
+
+要求：
+1. 提取完整的 URL（包括协议、域名、路径）
+2. 处理 PDF 中的换行问题（URL 可能被断成多行）
+3. 移除 URL 后面无关的内容（如论文标题、页码等）
+4. 标准的仓库 URL 格式：https://github.com/用户名/仓库名
+5. 如果不是代码仓库 URL，返回 null
+
+用 JSON 格式回复：
+{{
+  "urls": [
+    {{
+      "index": 1,
+      "url": "提取的完整URL或null",
+      "reason": "提取理由（中文）"
+    }}
+  ]
+}}"""
+        }
+    ]
+    
+    response = llm_client.call_json(messages, temperature=0.1)
+    
+    if not response or "urls" not in response:
+        print(f"    ⚠️  LLM 提取失败，使用备用方案")
+        # 备用方案：使用正则提取
+        return extract_urls_fallback([p["url_candidate"] for p in url_patterns])
+    
+    extracted_urls = []
+    for item in response["urls"]:
+        url = item.get("url")
+        reason = item.get("reason", "")
+        
+        if url and url != "null" and url.lower() != "null":
+            extracted_urls.append(url)
+            print(f"    ✓ 提取: {url}")
+            if reason:
+                print(f"      理由: {reason}")
+    
+    return extracted_urls
+
+
+def extract_urls_fallback(candidates: List[str]) -> List[str]:
+    """
+    备用方案：使用正则表达式提取 URL
+    
+    Args:
+        candidates: URL 候选列表
         
     Returns:
         URL 列表
     """
-    # 预处理：处理换行导致的 URL 断开
-    # 先处理 https:// 或 http:// 后面紧跟换行的情况
-    text = re.sub(r'(https?://[^\s<>"{}|\\^`\[\]]+?)\n\s*([a-zA-Z0-9\-_/\.]+)', r'\1\2', text)
-    
-    # URL 正则表达式 - 匹配 http:// 或 https:// 开头的 URL
+    urls = []
     url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
     
-    urls = re.findall(url_pattern, text, re.IGNORECASE)
-    
-    # 清理 URL
-    cleaned_urls = []
-    for url in urls:
-        # 移除尾部标点和常见的干扰字符
-        url = url.rstrip('.,;:!?)\']»')
-        # 移除可能的换行符
-        url = url.replace('\n', '').replace('\r', '')
+    for candidate in candidates:
+        # 处理换行
+        candidate = re.sub(r'\n\s*', '', candidate)
         
-        # 检查 URL 是否基本有效
-        if len(url) > 10 and '/' in url:
-            # 简单验证：至少有协议和域名部分
-            try:
-                # 检查域名部分是否合理
-                domain_part = url.split('//')[1].split('/')[0] if '//' in url else ''
-                if '.' in domain_part and len(domain_part) > 3:
-                    cleaned_urls.append(url)
-            except:
-                # 如果解析失败，仍然保留（可能是特殊格式）
-                cleaned_urls.append(url)
+        matches = re.findall(url_pattern, candidate)
+        for url in matches:
+            # 清理
+            url = url.rstrip('.,;:!?)\']»')
+            url = re.sub(r'\.(\d+)[A-Z][a-zA-Z]+.*$', r'.\1', url)
+            
+            if len(url) > 15 and 'github.com' in url.lower() or 'gitlab.com' in url.lower():
+                urls.append(url)
     
-    return list(set(cleaned_urls))  # 去重
-
-
-def extract_github_from_project_page(url: str) -> Optional[str]:
+    return list(set(urls))
     """
     从项目主页中提取 GitHub 链接
     
@@ -132,6 +237,88 @@ def extract_github_from_project_page(url: str) -> Optional[str]:
     except Exception as e:
         print(f"      ⚠️  访问项目页面失败: {e}")
         return None
+
+
+def clean_urls_with_llm(urls: List[str], paper_title: str) -> List[str]:
+    """
+    使用 LLM 清理和验证提取的 URL，移除错误拼接的部分
+    
+    Args:
+        urls: 原始 URL 列表
+        paper_title: 论文标题（用于上下文）
+        
+    Returns:
+        清理后的 URL 列表
+    """
+    if not urls:
+        return []
+    
+    # 如果URL看起来都正常（没有异常长的路径），直接返回
+    suspicious = False
+    for url in urls:
+        # 检查是否有异常特征
+        path = url.split('github.com/')[-1] if 'github.com' in url else ''
+        if len(path) > 50 or any(char.isupper() and i > 0 and path[i-1].islower() for i, char in enumerate(path)):
+            suspicious = True
+            break
+    
+    if not suspicious:
+        return urls
+    
+    print(f"    🤖 使用 LLM 清理可疑 URL...")
+    
+    urls_text = "\n".join([f"{i+1}. {url}" for i, url in enumerate(urls)])
+    
+    messages = [
+        {
+            "role": "system",
+            "content": "你是一个URL清理专家。帮助识别和修正从PDF中提取的GitHub URL，移除错误拼接的内容（如论文标题等）。"
+        },
+        {
+            "role": "user",
+            "content": f"""论文标题: {paper_title}
+
+从PDF中提取到以下URL，但可能包含错误拼接的内容（如把下一篇论文标题也拼接进去了）：
+{urls_text}
+
+请分析每个URL，移除不属于URL的部分，返回清理后的正确URL。
+
+要求：
+1. GitHub URL 格式通常是: https://github.com/用户名/仓库名
+2. 移除URL后面错误拼接的论文标题、页码等内容
+3. 如果URL无法修正，返回null
+
+用JSON格式回复：
+{{
+  "cleaned_urls": [
+    {{
+      "original": "原始URL",
+      "cleaned": "清理后的URL或null",
+      "reason": "清理原因（中文）"
+    }}
+  ]
+}}"""
+        }
+    ]
+    
+    response = llm_client.call_json(messages, temperature=0.1)
+    
+    if not response or "cleaned_urls" not in response:
+        print(f"    ⚠️  LLM 清理失败，使用原始URL")
+        return urls
+    
+    cleaned = []
+    for item in response["cleaned_urls"]:
+        cleaned_url = item.get("cleaned")
+        reason = item.get("reason", "")
+        
+        if cleaned_url and cleaned_url != "null":
+            cleaned.append(cleaned_url)
+            if cleaned_url != item.get("original"):
+                print(f"    ✂️  修正: {item.get('original')} -> {cleaned_url}")
+                print(f"       原因: {reason}")
+    
+    return cleaned if cleaned else urls
 
 
 def filter_code_urls(urls: List[str]) -> List[str]:
@@ -314,11 +501,27 @@ def extract_code_urls_from_pdf(
             "source": "pdf"
         }
     
-    # 2. 提取所有 URL
-    all_urls = extract_urls_from_text(text)
-    print(f"    找到 {len(all_urls)} 个 URL")
+    # 2. 提取 URL 模式和上下文
+    url_patterns = extract_url_patterns_with_context(text, context_chars=50)
+    print(f"    找到 {len(url_patterns)} 个 URL 模式")
     
-    # 3. 过滤出代码仓库 URL
+    if not url_patterns:
+        return {
+            "success": False,
+            "official_repo_url": None,
+            "candidates": [],
+            "source": "pdf"
+        }
+    
+    # 3. 使用 LLM 精确提取 URL
+    if use_llm:
+        all_urls = extract_urls_with_llm(url_patterns)
+    else:
+        all_urls = extract_urls_fallback([p["url_candidate"] for p in url_patterns])
+    
+    print(f"    提取出 {len(all_urls)} 个 URL")
+    
+    # 4. 过滤出代码仓库 URL
     code_urls = filter_code_urls(all_urls)
     print(f"    其中 {len(code_urls)} 个是代码仓库 URL")
     
@@ -330,7 +533,7 @@ def extract_code_urls_from_pdf(
             "source": "pdf"
         }
     
-    # 4. 根据上下文过滤
+    # 5. 根据上下文过滤
     urls_with_context = find_urls_with_context(text, code_urls)
     likely_code_urls = [
         url for url, context in urls_with_context
@@ -341,7 +544,7 @@ def extract_code_urls_from_pdf(
     candidates = likely_code_urls if likely_code_urls else code_urls
     print(f"    经上下文分析，{len(candidates)} 个候选链接")
     
-    # 5. 选择官方仓库
+    # 6. 选择官方仓库
     official_url = None
     
     if len(candidates) == 1:

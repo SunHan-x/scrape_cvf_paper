@@ -11,7 +11,7 @@ import requests
 from config import (
     MIN_CODE_FILES, MIN_REPO_SIZE_KB, MAX_ABANDONED_YEARS,
     MIN_STARS_FOR_OLD_REPO, CODE_EXTENSIONS, TYPICAL_IMPL_FILES,
-    TYPICAL_IMPL_DIRS
+    TYPICAL_IMPL_DIRS, MAX_DEPTH, MAX_FILES_TO_ANALYZE, SAMPLE_FILE_LINES
 )
 from utils import extract_repo_owner_name, truncate_text
 from llm_client import llm_client
@@ -33,18 +33,13 @@ def get_repo_file_tree(owner: str, repo: str, path: str = "") -> Optional[List[D
     searcher = GitHubSearcher()
     url = f"{searcher.base_url}/repos/{owner}/{repo}/contents/{path}"
     
+    response = searcher._make_request(url)
+    
+    if not response or response.status_code != 200:
+        return None
+    
     try:
-        response = requests.get(
-            url,
-            headers=searcher.headers,
-            timeout=10
-        )
-        
-        if response.status_code != 200:
-            return None
-        
         return response.json()
-        
     except Exception as e:
         print(f"    ⚠️  获取文件树失败: {e}")
         return None
@@ -64,16 +59,12 @@ def get_readme_content(owner: str, repo: str) -> Optional[str]:
     searcher = GitHubSearcher()
     url = f"{searcher.base_url}/repos/{owner}/{repo}/readme"
     
+    response = searcher._make_request(url)
+    
+    if not response or response.status_code != 200:
+        return None
+    
     try:
-        response = requests.get(
-            url,
-            headers=searcher.headers,
-            timeout=10
-        )
-        
-        if response.status_code != 200:
-            return None
-        
         data = response.json()
         
         # README 内容是 base64 编码的
@@ -132,6 +123,162 @@ def analyze_file_structure(files: List[Dict]) -> Dict:
         "has_typical_files": has_typical_files,
         "has_typical_dirs": has_typical_dirs,
     }
+
+
+def get_file_content(owner: str, repo: str, path: str) -> Optional[str]:
+    """
+    获取文件内容
+    
+    Args:
+        owner: 仓库所有者
+        repo: 仓库名称
+        path: 文件路径
+        
+    Returns:
+        文件内容
+    """
+    searcher = GitHubSearcher()
+    url = f"{searcher.base_url}/repos/{owner}/{repo}/contents/{path}"
+    
+    response = searcher._make_request(url)
+    
+    if not response or response.status_code != 200:
+        return None
+    
+    try:
+        data = response.json()
+        
+        # 文件内容是 base64 编码的
+        import base64
+        content = base64.b64decode(data["content"]).decode("utf-8", errors="ignore")
+        return content
+        
+    except Exception:
+        return None
+
+
+def deep_analyze_repo_structure(owner: str, repo: str, max_depth: int = MAX_DEPTH) -> Dict:
+    """
+    深度分析仓库结构
+    
+    Args:
+        owner: 仓库所有者
+        repo: 仓库名称
+        max_depth: 最大遍历深度
+        
+    Returns:
+        深度分析结果
+    """
+    all_code_files = []
+    all_directories = []
+    file_tree = {}
+    
+    def traverse_dir(path: str, depth: int):
+        """递归遍历目录"""
+        if depth > max_depth:
+            return
+        
+        files = get_repo_file_tree(owner, repo, path)
+        if not files:
+            return
+        
+        for item in files:
+            name = item.get("name", "")
+            item_type = item.get("type", "")
+            full_path = f"{path}/{name}" if path else name
+            
+            if item_type == "dir":
+                all_directories.append(full_path)
+                # 递归遍历子目录
+                traverse_dir(full_path, depth + 1)
+            elif item_type == "file":
+                ext = os.path.splitext(name)[1].lower()
+                if ext in CODE_EXTENSIONS:
+                    all_code_files.append({
+                        "path": full_path,
+                        "name": name,
+                        "extension": ext,
+                        "size": item.get("size", 0)
+                    })
+    
+    # 从根目录开始遍历
+    traverse_dir("", 0)
+    
+    # 分析代码文件分布
+    extension_counts = {}
+    for file in all_code_files:
+        ext = file["extension"]
+        extension_counts[ext] = extension_counts.get(ext, 0) + 1
+    
+    # 识别主要语言
+    main_language = max(extension_counts.items(), key=lambda x: x[1])[0] if extension_counts else None
+    
+    # 分析目录结构
+    has_models_dir = any("model" in d.lower() for d in all_directories)
+    has_data_dir = any("data" in d.lower() or "dataset" in d.lower() for d in all_directories)
+    has_train_dir = any("train" in d.lower() for d in all_directories)
+    has_test_dir = any("test" in d.lower() for d in all_directories)
+    has_config_dir = any("config" in d.lower() for d in all_directories)
+    
+    # 识别关键代码文件
+    key_files = []
+    for file in all_code_files:
+        name_lower = file["name"].lower()
+        if any(keyword in name_lower for keyword in ["train", "model", "network", "main", "run"]):
+            key_files.append(file)
+    
+    return {
+        "total_code_files": len(all_code_files),
+        "total_directories": len(all_directories),
+        "extension_counts": extension_counts,
+        "main_language": main_language,
+        "has_models_dir": has_models_dir,
+        "has_data_dir": has_data_dir,
+        "has_train_dir": has_train_dir,
+        "has_test_dir": has_test_dir,
+        "has_config_dir": has_config_dir,
+        "key_files": key_files[:10],  # 只保留前10个关键文件
+        "all_code_files": all_code_files[:MAX_FILES_TO_ANALYZE],  # 限制数量
+    }
+
+
+def sample_code_files(owner: str, repo: str, files: List[Dict], max_samples: int = 5) -> List[Dict]:
+    """
+    采样关键代码文件内容
+    
+    Args:
+        owner: 仓库所有者
+        repo: 仓库名称
+        files: 文件列表
+        max_samples: 最大采样数
+        
+    Returns:
+        采样的文件内容
+    """
+    samples = []
+    
+    # 优先选择关键文件
+    priority_keywords = ["train", "model", "network", "main"]
+    
+    # 先选择优先级高的文件
+    priority_files = [f for f in files if any(kw in f["name"].lower() for kw in priority_keywords)]
+    other_files = [f for f in files if f not in priority_files]
+    
+    selected_files = (priority_files + other_files)[:max_samples]
+    
+    for file in selected_files:
+        content = get_file_content(owner, repo, file["path"])
+        if content:
+            # 只取前N行
+            lines = content.split("\n")[:SAMPLE_FILE_LINES]
+            samples.append({
+                "path": file["path"],
+                "name": file["name"],
+                "lines": len(content.split("\n")),
+                "sample": "\n".join(lines)
+            })
+    
+    return samples
 
 
 def rule_based_filter(repo_info: Dict, paper_year: int) -> Dict:
@@ -231,7 +378,9 @@ def llm_evaluate_repo(
     repo_info: Dict,
     paper_data: Dict,
     structure: Dict,
-    readme: Optional[str] = None
+    readme: Optional[str] = None,
+    deep_structure: Optional[Dict] = None,
+    code_samples: Optional[List[Dict]] = None
 ) -> Dict:
     """
     使用 LLM 深度评估仓库质量
@@ -241,6 +390,8 @@ def llm_evaluate_repo(
         paper_data: 论文数据
         structure: 文件结构分析
         readme: README 内容
+        deep_structure: 深度结构分析
+        code_samples: 代码采样
         
     Returns:
         评估结果
@@ -255,49 +406,80 @@ def llm_evaluate_repo(
             readme = get_readme_content(owner, repo)
     
     # 构造文件树文本
-    tree_text = "Root directory:\n"
-    tree_text += f"  Code files ({structure['code_file_count']}): {', '.join(structure['code_files'][:10])}\n"
-    tree_text += f"  Directories ({structure['directory_count']}): {', '.join(structure['directories'][:10])}\n"
+    tree_text = "根目录:\n"
+    tree_text += f"  代码文件 ({structure['code_file_count']}): {', '.join(structure['code_files'][:10])}\n"
+    tree_text += f"  目录 ({structure['directory_count']}): {', '.join(structure['directories'][:10])}\n"
+    
+    # 添加深度结构信息
+    if deep_structure:
+        tree_text += f"\n深度分析 (遍历了 {MAX_DEPTH} 层目录):\n"
+        tree_text += f"  总代码文件数: {deep_structure['total_code_files']}\n"
+        tree_text += f"  文件类型分布: {deep_structure['extension_counts']}\n"
+        tree_text += f"  主要语言: {deep_structure['main_language']}\n"
+        tree_text += f"  目录结构:\n"
+        tree_text += f"    - 模型目录: {'有' if deep_structure['has_models_dir'] else '无'}\n"
+        tree_text += f"    - 数据目录: {'有' if deep_structure['has_data_dir'] else '无'}\n"
+        tree_text += f"    - 训练目录: {'有' if deep_structure['has_train_dir'] else '无'}\n"
+        tree_text += f"    - 测试目录: {'有' if deep_structure['has_test_dir'] else '无'}\n"
+        tree_text += f"    - 配置目录: {'有' if deep_structure['has_config_dir'] else '无'}\n"
+        
+        if deep_structure['key_files']:
+            tree_text += f"  关键文件:\n"
+            for file in deep_structure['key_files'][:5]:
+                tree_text += f"    - {file['path']}\n"
+    
+    # 添加代码采样
+    code_samples_text = ""
+    if code_samples:
+        code_samples_text = "\n代码示例:\n"
+        for sample in code_samples[:3]:  # 最多3个示例
+            code_samples_text += f"\n文件: {sample['path']} (共 {sample['lines']} 行)\n"
+            code_samples_text += f"```\n{sample['sample']}\n```\n"
     
     # 截断 README
-    readme_text = truncate_text(readme, 1000) if readme else "No README found"
+    readme_text = truncate_text(readme, 1000) if readme else "无 README"
     
     messages = [
         {
             "role": "system",
-            "content": "You are a senior ML engineer. Evaluate if a GitHub repository is a meaningful, well-maintained implementation. Reply in JSON format."
+            "content": "你是一位资深机器学习工程师。请评估 GitHub 仓库是否是一个有意义、维护良好的实现。请用 JSON 格式回复，并使用中文。"
         },
         {
             "role": "user",
-            "content": f"""Paper title: "{paper_data.get('title', '')}"
-Year: {paper_data.get('year', '')}
-Abstract: "{truncate_text(paper_data.get('abstract', ''), 300)}"
+            "content": f"""论文标题: "{paper_data.get('title', '')}"
+年份: {paper_data.get('year', '')}
+摘要: "{truncate_text(paper_data.get('abstract', ''), 300)}"
 
-Repository: {repo_info['html_url']}
+仓库: {repo_info['html_url']}
 
-Basic stats:
+基本统计:
 - Stars: {repo_info['stars']}
 - Forks: {repo_info['forks']}
-- Last commit: {repo_info['pushed_at']}
-- Main language: {repo_info['language']}
-- Size: {repo_info['size']}KB
-- Is archived: {repo_info.get('archived', False)}
-- Code files: {structure['code_file_count']}
-- Has typical structure: {structure['has_typical_files'] or structure['has_typical_dirs']}
+- 最后提交: {repo_info['pushed_at']}
+- 主要语言: {repo_info['language']}
+- 大小: {repo_info['size']}KB
+- 是否已归档: {repo_info.get('archived', False)}
+- 代码文件数: {structure['code_file_count']}
+- 是否有典型结构: {structure['has_typical_files'] or structure['has_typical_dirs']}
 
 {tree_text}
 
-README (truncated):
+README (截断):
 {readme_text}
 
-Evaluate this repository and reply in JSON format:
+{code_samples_text}
+
+请仔细分析仓库的代码架构、实现质量和维护状态，并用 JSON 格式回复：
 {{
   "is_meaningful": true/false,
   "is_implementation_of_paper": true/false,
+  "has_complete_architecture": true/false,
+  "code_organization_score": 0.0-1.0,
   "maintenance_score": 0.0-1.0,
   "code_quality_score": 0.0-1.0,
   "overall_score": 0.0-1.0,
-  "reasons": ["reason 1", "reason 2", ...]
+  "architecture_analysis": "代码架构分析（中文）",
+  "reasons": ["原因1（中文）", "原因2（中文）", ...]
 }}"""
         }
     ]
@@ -314,9 +496,12 @@ Evaluate this repository and reply in JSON format:
     return {
         "is_meaningful": response.get("is_meaningful", False),
         "is_implementation": response.get("is_implementation_of_paper", False),
+        "has_complete_architecture": response.get("has_complete_architecture", False),
+        "code_organization_score": response.get("code_organization_score", 0.0),
         "maintenance_score": response.get("maintenance_score", 0.0),
         "code_quality_score": response.get("code_quality_score", 0.0),
         "score": response.get("overall_score", 0.0),
+        "architecture_analysis": response.get("architecture_analysis", ""),
         "reasons": response.get("reasons", [])
     }
 
@@ -370,14 +555,32 @@ def validate_repository(
     
     # 需要 LLM 深度评估
     if use_llm:
+        print(f"    开始深度分析仓库结构...")
+        
+        # 深度分析仓库结构
+        deep_structure = deep_analyze_repo_structure(owner, repo)
+        print(f"    发现 {deep_structure['total_code_files']} 个代码文件")
+        
+        # 采样代码文件
+        code_samples = None
+        if deep_structure['all_code_files']:
+            print(f"    采样关键代码文件...")
+            code_samples = sample_code_files(owner, repo, deep_structure['all_code_files'], max_samples=5)
+            print(f"    成功采样 {len(code_samples)} 个文件")
+        
+        # LLM 评估
         llm_result = llm_evaluate_repo(
             repo_info,
             paper_data,
             rule_result.get("structure", {}),
-            None
+            None,
+            deep_structure,
+            code_samples
         )
         
         print(f"    LLM 评估分数: {llm_result.get('score', 'N/A')}")
+        if llm_result.get('architecture_analysis'):
+            print(f"    架构分析: {llm_result['architecture_analysis'][:100]}...")
         print(f"    原因: {', '.join(llm_result.get('reasons', []))}")
         
         return {

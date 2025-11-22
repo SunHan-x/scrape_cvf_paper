@@ -5,3 +5,4 @@ openpyxl
 PyPDF2
 pymupdf
 PyGithub
+python-dotenv

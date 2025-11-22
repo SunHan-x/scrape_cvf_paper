@@ -35,8 +35,46 @@
 
 ### 1. 安装依赖
 
+```markdown
+# 论文代码仓库查找和验证系统
+
+自动为 CVF 论文（CVPR、ICCV 等）查找官方/非官方代码实现，并验证仓库质量。
+
+## ✨ 功能特性
+
+### 🔍 三级代码查找策略
+1. **PDF 提取** - 从论文 PDF 中提取 GitHub/GitLab 等代码链接
+2. **GitHub 搜索** - 使用 GitHub API 搜索相关实现
+3. **LLM 辅助** - 使用 LLM 从多个候选中选择最佳仓库
+
+### ✅ 智能质量验证
+1. **规则过滤** - 快速过滤空仓库、废弃仓库
+2. **LLM 评估** - 深度分析 README、代码结构、维护状况
+
+### 📊 数据结构
+每篇论文生成 `github_links.json`：
+```json
+{
+  "official_repo_url": "https://github.com/...",
+  "unofficial_repo_urls": [],
+  "selected_repo_url": "https://github.com/...",
+  "repo_type": "official|unofficial|none_found",
+  "quality": {
+    "score": 0.85,
+    "is_meaningful": true,
+    "reason": "..."
+  },
+  "extraction_source": "pdf|github_search",
+  "processed_at": "2025-11-22T10:30:00"
+}
+```
+
+## 🚀 快速开始
+
+### 1. 安装依赖
+
 ```bash
-# 安装 Python 包
+# 使用 pip
 pip install -r requirements.txt
 
 # 或使用 conda
@@ -45,21 +83,28 @@ conda activate code_finder
 pip install -r requirements.txt
 ```
 
-### 2. 配置 API Key
+项目需 `python-dotenv` 来加载 `.env`（通常已包含在 `requirements.txt`）。如果未安装，可单独安装：
 
-编辑 `config.py`，填入你的 API Key：
-
-```python
-# Gemini API 配置
-GEMINI_API_KEY = "your_actual_api_key_here"
-
-# GitHub API Token（可选，但推荐）
-GITHUB_API_TOKEN = "your_github_token_here"
+```bash
+pip install python-dotenv
 ```
 
-**获取 API Key：**
-- Gemini API: https://zenmux.ai/google/gemini-3-pro-preview-free
-- GitHub Token: https://github.com/settings/tokens
+### 2. 配置 API Key（推荐使用 `.env`）
+
+为了安全管理敏感信息，项目现在统一使用 `.env` 文件来保存所有 API Key / Token。请参考仓库根目录下的 `.env.example`：
+
+```
+# .env 示例（不要提交真实密钥）
+GEMINI_API_KEY=your_actual_api_key_here
+GITHUB_API_TOKEN=your_github_token_here
+ALIYUN_API_KEY=your_aliyun_key
+OPENAI_API_KEY=your_openai_key
+MOONSHOT_API_KEY=your_moonshot_key
+```
+
+项目会通过 `python-dotenv` 自动加载 `.env`，因此无须在 `config.py` 中写入真实密钥。
+
+**注意**: 请务必不要将真实的 `.env` 提交到远程仓库；项目已将 `.env` 添加到 `.gitignore`。
 
 ### 3. 运行
 
@@ -125,7 +170,7 @@ python main.py --skip-pdf --no-resume
 
 ```
 .
-├── config.py              # 配置文件（API Key、参数）
+├── config.py              # 从环境变量读取配置
 ├── llm_client.py          # LLM API 客户端封装
 ├── utils.py               # 通用工具函数
 ├── pdf_extractor.py       # PDF 代码链接提取器
@@ -133,6 +178,7 @@ python main.py --skip-pdf --no-resume
 ├── repo_validator.py      # 仓库质量验证器
 ├── main.py                # 主流程脚本
 ├── requirements.txt       # Python 依赖
+├── .env.example           # 环境变量示例（不要提交真实值）
 └── CVPR_PAPERS_TEST/      # 论文数据目录
     └── CVPR/
         └── 2024/
@@ -181,9 +227,9 @@ python main.py --skip-pdf --no-resume
 ### config.py 重要参数
 
 ```python
-# API 配置
-GEMINI_API_KEY = "..."           # 必填
-GITHUB_API_TOKEN = "..."         # 可选但推荐
+# API 配置（通过环境变量加载）
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+GITHUB_API_TOKEN = os.getenv('GITHUB_API_TOKEN')
 
 # 路径配置
 PAPERS_ROOT_DIR = "./CVPR_PAPERS_TEST"
@@ -243,31 +289,34 @@ MIN_STARS_FOR_OLD_REPO = 5       # 老仓库最少 star 数
 
 ## 🐛 故障排除
 
-### 问题 1: API 调用失败
+### 问题 1: API 调用失败（401/403）
 ```
-❌ LLM API 请求失败: 403 Forbidden
+❌ LLM API 请求失败: 401 Unauthorized / 403 Forbidden
 ```
-**解决**: 检查 `config.py` 中的 `GEMINI_API_KEY` 是否正确
+解决方法：
+- 检查 `.env` 中对应的密钥是否正确、是否过期或被限流。
+- 确保 `python-dotenv` 已安装且 `.env` 位于项目根目录。
 
 ### 问题 2: GitHub API 限速
 ```
-⚠️  GitHub API 限速，等待...
+⚠️  GitHub API 限速，返回 403 rate limit
 ```
-**解决**: 
-- 添加 GitHub Token 到 `config.py`
-- 或等待限速解除（约 60 分钟）
+解决方法：
+- 在 `.env` 中设置 `GITHUB_API_TOKEN`（推荐），以提高速率配额。
+- 启用重试与指数退避策略，或降低请求并发数。
 
 ### 问题 3: PDF 提取失败
 ```
 ❌ PDF 提取失败: ...
 ```
-**解决**: 确保已安装 `pymupdf`：`pip install pymupdf`
+解决方法：
+- 确保已安装 `pymupdf`（`pip install pymupdf`）或其它支持的 PDF 解析库。
 
 ### 问题 4: 没有找到代码
-**可能原因:**
+可能原因：
 - 论文确实没有公开代码
-- PDF 中没有链接 → 会自动尝试 GitHub 搜索
-- GitHub 搜索没有结果 → 标记为 `none_found`
+- PDF 中没有链接 → 自动尝试 GitHub 搜索
+- GitHub 搜索未匹配到实现 → 标记为 `none_found`
 
 ## 📝 示例输出
 
@@ -300,7 +349,9 @@ MIN_STARS_FOR_OLD_REPO = 5       # 老仓库最少 star 数
 
 ## 🤝 贡献
 
-欢迎提交 Issue 和 Pull Request！
+欢迎提交 Issue 和 Pull Request！贡献时请注意：
+
+- 不要在 PR 中包含任何真实的密钥或 `.env` 文件。
 
 ## 📄 许可
 
@@ -311,3 +362,5 @@ MIT License
 - CVF Open Access 提供论文数据
 - Gemini API 提供 LLM 支持
 - GitHub API 提供仓库搜索
+
+```

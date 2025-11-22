@@ -27,7 +27,8 @@ def process_single_paper(
     paper_dir: str,
     use_llm: bool = True,
     skip_pdf: bool = False,
-    skip_validation: bool = False
+    skip_validation: bool = False,
+    skip_if_processed: bool = True
 ) -> Dict:
     """
     处理单篇论文的完整流程
@@ -37,11 +38,14 @@ def process_single_paper(
         use_llm: 是否使用 LLM
         skip_pdf: 是否跳过 PDF 提取
         skip_validation: 是否跳过仓库验证
+        skip_if_processed: 是否跳过已处理的论文
         
     Returns:
         处理结果
     """
     paper_name = os.path.basename(paper_dir)
+    start_time = time.time()
+    
     print(f"\n{'='*80}")
     print(f"📝 处理论文: {paper_name}")
     print(f"{'='*80}")
@@ -59,13 +63,14 @@ def process_single_paper(
     existing_code_data = load_code_data(paper_dir)
     
     # 检查是否已经处理过
-    if existing_code_data.get("selected_repo_url"):
+    if skip_if_processed and existing_code_data.get("selected_repo_url"):
         print(f"✅ 已有代码仓库: {existing_code_data['selected_repo_url']}")
         if not skip_validation and existing_code_data.get("quality", {}).get("score") is None:
             print("  重新验证仓库质量...")
         else:
-            print("⏭️  跳过已处理的论文")
-            return {"success": True, "reason": "Already processed", "data": existing_code_data}
+            elapsed = time.time() - start_time
+            print(f"⏭️  跳过已处理的论文 (耗时: {elapsed:.2f}秒)")
+            return {"success": True, "reason": "Already processed", "data": existing_code_data, "elapsed_time": elapsed}
     
     # 创建代码数据结构
     code_data = create_code_data_structure()
@@ -132,11 +137,14 @@ def process_single_paper(
     code_data["processed_at"] = datetime.now().isoformat()
     save_code_data(paper_dir, code_data)
     
+    elapsed = time.time() - start_time
     print(f"\n💾 结果已保存到 {os.path.join(paper_dir, 'github_links.json')}")
+    print(f"⏱️  总耗时: {elapsed:.2f}秒 ({elapsed/60:.2f}分钟)")
     
     return {
         "success": True,
-        "data": code_data
+        "data": code_data,
+        "elapsed_time": elapsed
     }
 
 
@@ -196,13 +204,15 @@ def process_all_papers(
     
     for i, paper_dir in enumerate(paper_dirs, 1):
         paper_name = os.path.basename(paper_dir)
+        paper_start_time = time.time()
         print(f"\n[{i}/{total}] {paper_name}")
         
         # 检查是否已处理
         if resume:
             existing = load_code_data(paper_dir)
             if existing.get("processed_at"):
-                print("⏭️  已处理，跳过")
+                paper_elapsed = time.time() - paper_start_time
+                print(f"⏭️  已处理，跳过 (耗时: {paper_elapsed:.2f}秒)")
                 stats["skipped"] += 1
                 continue
         
@@ -211,10 +221,13 @@ def process_all_papers(
                 paper_dir,
                 use_llm=use_llm,
                 skip_pdf=skip_pdf,
-                skip_validation=skip_validation
+                skip_validation=skip_validation,
+                skip_if_processed=resume
             )
             
             if result["success"]:
+                paper_elapsed = result.get("elapsed_time", time.time() - paper_start_time)
+                print(f"\n⏱️  本篇耗时: {paper_elapsed:.2f}秒 ({paper_elapsed/60:.2f}分钟)")
                 stats["processed"] += 1
                 
                 data = result.get("data", {})
@@ -243,16 +256,18 @@ def process_all_papers(
         
         # 打印进度
         elapsed = time.time() - start_time
-        avg_time = elapsed / (i - stats["skipped"]) if (i - stats["skipped"]) > 0 else 0
+        processed_count = i - stats["skipped"]
+        avg_time = elapsed / processed_count if processed_count > 0 else 0
         remaining = (total - i) * avg_time
         
-        print(f"\n进度: {i}/{total} | "
+        print(f"\n📊 进度: {i}/{total} | "
               f"已处理: {stats['processed']} | "
               f"跳过: {stats['skipped']} | "
               f"错误: {stats['errors']}")
-        print(f"预计剩余时间: {remaining/60:.1f} 分钟")
+        print(f"⏱️  平均耗时: {avg_time:.2f}秒/篇 | 已用时间: {elapsed/60:.1f}分钟 | 预计剩余: {remaining/60:.1f}分钟")
     
     # 最终统计
+    total_elapsed = time.time() - start_time
     print(f"\n{'='*80}")
     print(f"✅ 处理完成")
     print(f"{'='*80}")
@@ -267,7 +282,9 @@ def process_all_papers(
     print(f"\n仓库质量:")
     print(f"  有意义: {stats['meaningful']}")
     print(f"  无意义: {stats['not_meaningful']}")
-    print(f"\n总耗时: {(time.time() - start_time)/60:.1f} 分钟")
+    print(f"\n⏱️  总耗时: {total_elapsed:.2f}秒 ({total_elapsed/60:.1f}分钟)")
+    if stats['processed'] > 0:
+        print(f"⏱️  平均耗时: {total_elapsed/stats['processed']:.2f}秒/篇")
 
 
 def main():
@@ -351,7 +368,8 @@ def main():
             paper_dir,
             use_llm=not args.no_llm,
             skip_pdf=args.skip_pdf,
-            skip_validation=args.skip_validation
+            skip_validation=args.skip_validation,
+            skip_if_processed=not args.no_resume
         )
     else:
         # 批量处理模式

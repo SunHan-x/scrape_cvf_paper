@@ -23,6 +23,77 @@ class GitHubSearcher:
         if token and token != "your_github_token_here":
             self.headers["Authorization"] = f"token {token}"
     
+    def check_rate_limit(self) -> Dict:
+        """检查 API 速率限制状态"""
+        try:
+            response = requests.get(
+                f"{self.base_url}/rate_limit",
+                headers=self.headers,
+                timeout=10
+            )
+            if response.status_code == 200:
+                data = response.json()
+                return data.get("rate", {})
+        except Exception:
+            pass
+        return {}
+    
+    def wait_for_rate_limit(self, retry_after: Optional[int] = None):
+        """等待速率限制恢复"""
+        if retry_after:
+            wait_time = retry_after + 5  # 额外等待 5 秒
+        else:
+            rate_limit = self.check_rate_limit()
+            remaining = rate_limit.get("remaining", 0)
+            reset_time = rate_limit.get("reset", 0)
+            
+            if remaining == 0 and reset_time:
+                wait_time = max(reset_time - time.time() + 5, 60)
+            else:
+                wait_time = 60
+        
+        print(f"    ⏳ 等待 {wait_time:.0f} 秒后重试...")
+        time.sleep(wait_time)
+    
+    def _make_request(self, url: str, params: Optional[Dict] = None, max_retries: int = 3) -> Optional[requests.Response]:
+        """发起 HTTP 请求，带有重试和速率限制处理"""
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(
+                    url,
+                    headers=self.headers,
+                    params=params,
+                    timeout=10
+                )
+                
+                # 处理速率限制
+                if response.status_code == 403:
+                    retry_after = response.headers.get("Retry-After")
+                    if "rate limit" in response.text.lower():
+                        print(f"    ⚠️  GitHub API 速率限制 (尝试 {attempt + 1}/{max_retries})")
+                        if attempt < max_retries - 1:
+                            self.wait_for_rate_limit(int(retry_after) if retry_after else None)
+                            continue
+                        else:
+                            return None
+                    else:
+                        return response
+                
+                return response
+                
+            except requests.exceptions.Timeout:
+                print(f"    ⚠️  请求超时 (尝试 {attempt + 1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+            except requests.exceptions.RequestException as e:
+                print(f"    ⚠️  请求失败: {e} (尝试 {attempt + 1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+        
+        return None
+    
     def search_repositories(
         self,
         query: str,
@@ -46,20 +117,13 @@ class GitHubSearcher:
             "per_page": min(max_results, 100)
         }
         
+        response = self._make_request(url, params)
+        
+        if not response or response.status_code != 200:
+            print(f"    ❌ GitHub 搜索失败")
+            return []
+        
         try:
-            response = requests.get(
-                url,
-                headers=self.headers,
-                params=params,
-                timeout=10
-            )
-            
-            if response.status_code == 403:
-                print(f"    ⚠️  GitHub API 限速，等待...")
-                time.sleep(60)
-                return []
-            
-            response.raise_for_status()
             data = response.json()
             
             repos = []
@@ -79,7 +143,7 @@ class GitHubSearcher:
             return repos
             
         except Exception as e:
-            print(f"    ❌ GitHub 搜索失败: {e}")
+            print(f"    ❌ 解析响应失败: {e}")
             return []
     
     def get_repo_info(self, owner: str, repo: str) -> Optional[Dict]:
@@ -95,17 +159,19 @@ class GitHubSearcher:
         """
         url = f"{self.base_url}/repos/{owner}/{repo}"
         
+        response = self._make_request(url)
+        
+        if not response:
+            return None
+        
+        if response.status_code == 404:
+            return None
+        
+        if response.status_code != 200:
+            print(f"    ❌ 获取仓库信息失败: HTTP {response.status_code}")
+            return None
+        
         try:
-            response = requests.get(
-                url,
-                headers=self.headers,
-                timeout=10
-            )
-            
-            if response.status_code == 404:
-                return None
-            
-            response.raise_for_status()
             data = response.json()
             
             return {
@@ -127,7 +193,7 @@ class GitHubSearcher:
             }
             
         except Exception as e:
-            print(f"    ❌ 获取仓库信息失败: {e}")
+            print(f"    ❌ 解析仓库信息失败: {e}")
             return None
 
 
@@ -187,28 +253,28 @@ def filter_implementations_with_llm(
     messages = [
         {
             "role": "system",
-            "content": "You are a classifier that identifies if GitHub repositories are implementations of a specific research paper. Reply in JSON format."
+            "content": "你是一个分类器，用于识别 GitHub 仓库是否是某篇研究论文的实现代码。请用 JSON 格式回复，并使用中文。"
         },
         {
             "role": "user",
-            "content": f"""Paper title: "{paper_data.get('title', '')}"
-Year: {paper_data.get('year', '')}
-Conference: {paper_data.get('conference', '')}
-Abstract: "{paper_data.get('abstract', '')[:500]}..."
+            "content": f"""论文标题: "{paper_data.get('title', '')}"
+年份: {paper_data.get('year', '')}
+会议: {paper_data.get('conference', '')}
+摘要: "{paper_data.get('abstract', '')[:500]}..."
 
-Here are GitHub repositories from search results:
+以下是 GitHub 搜索结果中的仓库：
 {chr(10).join(candidates_text)}
 
-For each repository, determine if it is an implementation of this paper (or a very close re-implementation).
-Reply in JSON format with an array of objects:
+对于每个仓库，判断它是否是这篇论文的实现代码（或非常接近的重新实现）。
+请用 JSON 格式回复，包含一个对象数组：
 {{
   "repositories": [
     {{
-      "full_name": "<repo full name>",
-      "url": "<repo url>",
+      "full_name": "<仓库全名>",
+      "url": "<仓库 URL>",
       "is_implementation": true/false,
       "relevance": 0.0-1.0,
-      "reason": "brief explanation"
+      "reason": "简要说明原因（中文）"
     }},
     ...
   ]
