@@ -7,7 +7,7 @@
 LLM_PROVIDER = "aliyun"  # 使用阿里云百炼
 
 # 阿里云百炼 (Qwen) 配置 - 推荐使用
-ALIYUN_API_KEY = "sk-78c27d13e7e14434b353402d73069882"  # 从百炼控制台获取
+ALIYUN_API_KEY = "*"  # 从百炼控制台获取
 ALIYUN_API_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
 ALIYUN_MODEL = "qwen-plus"  # 可选: qwen-plus, qwen-turbo, qwen-max
 
