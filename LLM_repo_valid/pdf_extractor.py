@@ -6,6 +6,8 @@ import os
 import re
 from typing import List, Dict, Optional, Tuple
 import pymupdf  # PyMuPDF
+import requests
+from bs4 import BeautifulSoup
 
 from config import CODE_HOST_DOMAINS, CODE_KEYWORDS
 from utils import is_valid_repo_url, normalize_url
@@ -47,7 +49,7 @@ def extract_text_from_pdf(pdf_path: str) -> Optional[str]:
 
 def extract_urls_from_text(text: str) -> List[str]:
     """
-    从文本中提取所有 URL
+    从文本中提取所有 URL，处理换行断开的 URL
     
     Args:
         text: 文本内容
@@ -55,23 +57,86 @@ def extract_urls_from_text(text: str) -> List[str]:
     Returns:
         URL 列表
     """
-    # URL 正则表达式
+    # 预处理：处理换行导致的 URL 断开
+    # 先处理 https:// 或 http:// 后面紧跟换行的情况
+    text = re.sub(r'(https?://[^\s<>"{}|\\^`\[\]]+?)\n\s*([a-zA-Z0-9\-_/\.]+)', r'\1\2', text)
+    
+    # URL 正则表达式 - 匹配 http:// 或 https:// 开头的 URL
     url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
     
     urls = re.findall(url_pattern, text, re.IGNORECASE)
     
-    # 清理 URL（移除尾部标点符号）
+    # 清理 URL
     cleaned_urls = []
     for url in urls:
-        url = url.rstrip('.,;:!?)')
-        cleaned_urls.append(url)
+        # 移除尾部标点和常见的干扰字符
+        url = url.rstrip('.,;:!?)\']»')
+        # 移除可能的换行符
+        url = url.replace('\n', '').replace('\r', '')
+        
+        # 检查 URL 是否基本有效
+        if len(url) > 10 and '/' in url:
+            # 简单验证：至少有协议和域名部分
+            try:
+                # 检查域名部分是否合理
+                domain_part = url.split('//')[1].split('/')[0] if '//' in url else ''
+                if '.' in domain_part and len(domain_part) > 3:
+                    cleaned_urls.append(url)
+            except:
+                # 如果解析失败，仍然保留（可能是特殊格式）
+                cleaned_urls.append(url)
     
     return list(set(cleaned_urls))  # 去重
 
 
+def extract_github_from_project_page(url: str) -> Optional[str]:
+    """
+    从项目主页中提取 GitHub 链接
+    
+    Args:
+        url: 项目主页 URL
+        
+    Returns:
+        GitHub 链接，如果没找到返回 None
+    """
+    try:
+        print(f"      🔗 访问项目页面: {url}")
+        response = requests.get(url, timeout=10, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        
+        if response.status_code != 200:
+            return None
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # 查找所有链接
+        for link in soup.find_all('a', href=True):
+            href = link['href']
+            
+            # 检查是否是 GitHub 链接
+            if 'github.com' in href.lower():
+                # 标准化 URL
+                if href.startswith('//'):
+                    href = 'https:' + href
+                elif href.startswith('/'):
+                    continue
+                
+                # 验证是否是有效的仓库链接
+                if is_valid_repo_url(href, ['github.com']):
+                    print(f"      ✅ 找到 GitHub 链接: {href}")
+                    return normalize_url(href)
+        
+        return None
+        
+    except Exception as e:
+        print(f"      ⚠️  访问项目页面失败: {e}")
+        return None
+
+
 def filter_code_urls(urls: List[str]) -> List[str]:
     """
-    过滤出代码仓库 URL
+    过滤出代码仓库 URL，并从项目主页提取 GitHub 链接
     
     Args:
         urls: URL 列表
@@ -80,12 +145,36 @@ def filter_code_urls(urls: List[str]) -> List[str]:
         代码仓库 URL 列表
     """
     code_urls = []
+    project_pages = []  # 可能是项目主页的 URL
     
     for url in urls:
+        # 直接是代码仓库
         if is_valid_repo_url(url, CODE_HOST_DOMAINS):
             normalized = normalize_url(url)
             if normalized not in code_urls:
                 code_urls.append(normalized)
+        
+        # 可能是项目主页（常见模式）
+        elif any(pattern in url.lower() for pattern in [
+            '.github.io',
+            'github.io',
+            'project',
+            'page',
+            'demo',
+            'site'
+        ]):
+            # 避免明显不是项目页的链接
+            if not any(skip in url.lower() for skip in ['arxiv.org', 'doi.org', 'youtube.com']):
+                project_pages.append(url)
+    
+    # 如果没有直接找到代码链接，尝试从项目页提取
+    if not code_urls and project_pages:
+        print(f"    🔍 未找到直接代码链接，尝试从 {len(project_pages)} 个项目页面提取...")
+        
+        for page_url in project_pages[:3]:  # 最多尝试3个
+            github_url = extract_github_from_project_page(page_url)
+            if github_url and github_url not in code_urls:
+                code_urls.append(github_url)
     
     return code_urls
 
